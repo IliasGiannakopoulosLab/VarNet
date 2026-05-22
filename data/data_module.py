@@ -115,7 +115,6 @@ class DataModule(pl.LightningDataModule):
         batch_size: int = 1,
         num_workers: int = 4,
         distributed_sampler: bool = False,
-        dataset_format: str = "slice",
     ):
         super().__init__()
 
@@ -156,7 +155,6 @@ class DataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.distributed_sampler = distributed_sampler
-        self.dataset_format = dataset_format
 
     # -------------------------------------------#
     # -------- dataloader builder -------------- #
@@ -304,8 +302,6 @@ class DataModule(pl.LightningDataModule):
         parser.add_argument("--combine_train_val", type=bool, default=False)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=4)
-        parser.add_argument("--dataset_format", type=str, default="slice", choices=("slice"))
-
         return parser
 
 # -------------------------------------------#
