@@ -243,4 +243,3 @@ Finally, train and calibrate uncertainty on top of the trained reconstruction ch
 - If you use the E2E VarNet please cite Sriram, Anuroop, et al. "End-to-end variational networks for accelerated MRI reconstruction." International conference on medical image computing and computer-assisted intervention. Cham: Springer International Publishing, 2020.
 - If you use the FI VarNet please cite Giannakopoulos, Ilias I., et al. "Accelerated MRI reconstructions via variational network and feature domain learning." Scientific Reports 14.1 (2024): 10991.
 - If you use the Uncertainty please cite Giannakopoulos, Ilias I., et al. "Pixelwise Uncertainty Quantification of Accelerated MRI Reconstruction." arXiv preprint arXiv:2601.13236 (2026).
-- If you use the Learnable Mask or the 3D version of the VarNet please cite the repository 
