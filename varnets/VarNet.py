@@ -4,7 +4,6 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 torch.set_float32_matmul_precision("high")
 from utilities.functions import ifft2c_new as ifft2c
 from utilities.functions import (
@@ -53,8 +52,6 @@ class FeatureImage(NamedTuple):
     variances: Tensor = None
     mask: Tensor = None
     ref_kspace: Tensor = None
-    beta: Optional[Tensor] = None
-    gamma: Optional[Tensor] = None
 
 
 # -------------------------------------------#
@@ -64,14 +61,7 @@ def _safe_crop_size(
     image: Tensor,
     crop_size: Optional[Tuple[int, int]],
 ) -> Optional[Tuple[int, int]]:
-    """Return a valid center-crop size for the H/W image dimensions.
-
-    Supports both channel-first tensors and complex-last tensors:
-        [B, C, H, W]
-        [B, C, H, W, 2]
-        [B, C, D, H, W]
-        [B, C, D, H, W, 2]
-    """
+    """Return a valid center-crop size for the H/W image dimensions."""
 
     if crop_size is None:
         return None
@@ -100,11 +90,7 @@ def _apply_model_with_optional_crop(
     image: Tensor,
     crop_size: Optional[Tuple[int, int]],
 ) -> Tensor:
-    """Apply an image-domain model on a center crop and uncrop back.
-
-    The crop is applied only over the last two dimensions. For 3D tensors this
-    keeps the slice/depth dimension intact and crops only H/W.
-    """
+    """Apply an image-domain model on a center crop and uncrop back."""
 
     crop_size = _safe_crop_size(image, crop_size)
 
