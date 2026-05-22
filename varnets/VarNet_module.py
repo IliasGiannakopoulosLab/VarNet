@@ -1,16 +1,15 @@
 from argparse import ArgumentParser
-from pathlib import Path
-from typing import Optional
 import math
 import torch
-import torch.nn as nn
+
+from .Network_module import MriModule
+from .VarNet import FIVarNet
+from utilities.functions import center_crop_to_smallest, center_crop
+from utilities.losses import SSIMLoss
+
 
 torch.set_float32_matmul_precision("high")
 
-from .Network_module import MriModule
-from .VarNet import FIVarNet, E2EVarNet
-from utilities.functions import center_crop_to_smallest, center_crop
-from utilities.losses import SSIMLoss
 
 class FIVarNetModule(MriModule):
     def __init__(
@@ -43,11 +42,10 @@ class FIVarNetModule(MriModule):
         self.fi_varnet = fi_varnet
         self.ssim_loss = SSIMLoss()
 
-    def forward(self, batch, return_mask_extras: bool = False):
-        return self._run_reconstruction_model(batch, return_mask_extras=return_mask_extras)
+    def forward(self, batch):
+        return self._run_reconstruction_model(batch)
 
-    def _run_reconstruction_model(self, batch, return_mask_extras: bool = False):
-        
+    def _run_reconstruction_model(self, batch):
         return self.fi_varnet(
             batch.masked_kspace,
             batch.mask,
@@ -69,7 +67,7 @@ class FIVarNetModule(MriModule):
         return target, output, reconstruction_loss, ssim_loss
 
     def training_step(self, batch, batch_idx):
-        output = self._run_reconstruction_model(batch, return_mask_extras=False)
+        output = self._run_reconstruction_model(batch)
         target, output, loss, ssim_loss = self._compute_reconstruction_loss(batch, output)
 
         self.log("train/ssim", ssim_loss.detach(), sync_dist=True)
@@ -77,8 +75,7 @@ class FIVarNetModule(MriModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        output = self._run_reconstruction_model(batch, return_mask_extras=False)
-
+        output = self._run_reconstruction_model(batch)
         target, output, reconstruction_loss, ssim_loss = self._compute_reconstruction_loss(batch, output)
 
         return {
@@ -94,8 +91,7 @@ class FIVarNetModule(MriModule):
         }
 
     def test_step(self, batch, batch_idx):
-       
-        output = self._run_reconstruction_model(batch, return_mask_extras=False)
+        output = self._run_reconstruction_model(batch)
 
         crop_size = (
             (output.shape[-1], output.shape[-1])
