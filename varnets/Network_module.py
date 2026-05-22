@@ -24,22 +24,18 @@ class MriModule(pl.LightningModule):
     def validation_step_end(self, val_logs):
 
         required = [
-            "batch_idx","fname","slice_num","max_value",
-            "output","target","val_loss"
+            "batch_idx", "fname", "slice_num", "max_value",
+            "output", "target", "val_loss"
         ]
         for k in required:
             if k not in val_logs:
                 raise RuntimeError(f"Missing key {k} from validation_step.")
 
-        # ensure correct shape
         if val_logs["output"].ndim == 2:
             val_logs["output"] = val_logs["output"].unsqueeze(0)
         if val_logs["target"].ndim == 2:
             val_logs["target"] = val_logs["target"].unsqueeze(0)
-        if val_logs.get("mask_1d") is not None and val_logs["mask_1d"].ndim == 1:
-            val_logs["mask_1d"] = val_logs["mask_1d"].unsqueeze(0)
 
-        # choose validation images once
         if self.val_log_indices is None:
             self.val_log_indices = list(
                 np.random.permutation(
@@ -47,7 +43,6 @@ class MriModule(pl.LightningModule):
                 )[: self.num_log_images]
             )
 
-        # log images
         batch_indices = (
             [val_logs["batch_idx"]]
             if isinstance(val_logs["batch_idx"], int)
@@ -70,14 +65,9 @@ class MriModule(pl.LightningModule):
                 self.log_image(f"{key}/reconstruction", output)
                 self.log_image(f"{key}/error", error)
 
-                if val_logs.get("mask_1d") is not None:
-                    mask_1d = val_logs["mask_1d"][i].float().unsqueeze(0).unsqueeze(0)
-                    self.log_image(f"{key}/mask_1d", mask_1d)
-
         mse_vals = defaultdict(dict)
         target_norms = defaultdict(dict)
         ssim_vals = defaultdict(dict)
-
         max_vals = {}
 
         for i, fname in enumerate(val_logs["fname"]):
@@ -95,7 +85,7 @@ class MriModule(pl.LightningModule):
             ).view(1)
 
             ssim_vals[fname][slice_num] = torch.tensor(
-                evaluation.ssim(target[None,...], output[None,...], maxval=maxval)
+                evaluation.ssim(target[None, ...], output[None, ...], maxval=maxval)
             ).view(1)
 
             max_vals[fname] = maxval
@@ -137,9 +127,9 @@ class MriModule(pl.LightningModule):
                 max_vals[k] = log["max_vals"][k]
 
         metrics = {
-            "nmse":0,
-            "ssim":0,
-            "psnr":0,
+            "nmse": 0,
+            "ssim": 0,
+            "psnr": 0,
         }
 
         local_examples = 0
@@ -153,8 +143,8 @@ class MriModule(pl.LightningModule):
             metrics["nmse"] += mse_val / target_norm
 
             metrics["psnr"] += (
-                20*torch.log10(torch.tensor(max_vals[fname],dtype=mse_val.dtype,device=mse_val.device))
-                -10*torch.log10(mse_val)
+                20 * torch.log10(torch.tensor(max_vals[fname], dtype=mse_val.dtype, device=mse_val.device))
+                - 10 * torch.log10(mse_val)
             )
 
             metrics["ssim"] += torch.mean(torch.cat([v.view(-1) for v in ssim_vals[fname].values()]))
@@ -163,10 +153,10 @@ class MriModule(pl.LightningModule):
         val_loss = torch.sum(torch.cat(losses)).to(self.device)
         tot_slice_examples = torch.tensor(len(losses), dtype=torch.float, device=self.device)
 
-        self.log("val/loss", val_loss/tot_slice_examples, prog_bar=True, sync_dist=True)
+        self.log("val/loss", val_loss / tot_slice_examples, prog_bar=True, sync_dist=True)
 
-        for m,v in metrics.items():
-            self.log(f"val/{m}", v/tot_examples, sync_dist=True)
+        for m, v in metrics.items():
+            self.log(f"val/{m}", v / tot_examples, sync_dist=True)
 
     # ============================================================
     # TEST
@@ -174,16 +164,10 @@ class MriModule(pl.LightningModule):
     def test_epoch_end(self, test_logs):
 
         outputs = defaultdict(dict)
-        masks_1d = defaultdict(dict)
-        support_widths = defaultdict(dict)
-        accelerations = defaultdict(dict)
-        acq_starts = defaultdict(dict)
-        acq_ends = defaultdict(dict)
 
         for log in test_logs:
             for i, (fname, slice_num) in enumerate(zip(log["fname"], log["slice"])):
                 sl = int(slice_num.cpu())
-
                 outputs[fname][sl] = log["output"][i]
 
         packed = {}
@@ -211,5 +195,5 @@ class MriModule(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
-        parser.add_argument("--num_log_images",default=16,type=int)
+        parser.add_argument("--num_log_images", default=16, type=int)
         return parser
