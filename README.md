@@ -1,49 +1,51 @@
-# MRI Reconstruction with VarNet, Learnable Sampling, and Pixelwise Uncertainty
+# MRI Reconstruction with VarNet and Pixelwise Uncertainty
 
-This repository contains PyTorch Lightning implementations for accelerated MRI reconstruction using variational networks and pixelwise uncertainty estimation.
-The stable functionality is focused on 2D reconstruction. 
+This repository contains a clean PyTorch Lightning implementation for **2D accelerated MRI reconstruction** using variational networks, together with a separate pixelwise uncertainty estimation pipeline.
 
-## Main features
+The codebase is intentionally focused on the stable reconstruction and uncertainty workflows:
 
-- 2D accelerated MRI reconstruction
-- Feature-image and end-to-end VarNet models
+- End-to-end VarNet (`e2e_varnet`)
+- Feature-image VarNet (`fi_varnet`)
 - Fixed Cartesian undersampling masks
 - Pixelwise uncertainty estimation using quantile regression and conformal calibration
+
+The repository does **not** include the experimental 3D/multi-slice pipeline, learnable sampling masks, or YOLO/perceptual-loss training path.
+
+---
 
 ## Repository structure
 
 ```text
 data/
-  data_module.py              Lightning data module and fastMRI-style datasets
-  data_transforms.py          2D and volume VarNet transforms
-  learnable_mask.py           Learnable Cartesian masks
+  data_module.py              Lightning data module and fastMRI-style slice dataset
+  data_transforms.py          VarNet slice transform
   undersampling_patterns.py   Fixed Cartesian mask definitions
 
 varnets/
-  VarNet.py                   VarNet, FI-VarNet, learnable-mask wrappers
-  VarNet_module.py            2D Lightning reconstruction module
-  Network_module.py           2D validation, testing, and logging utilities
-  uncertainty_module.py       2D uncertainty module
+  VarNet.py                   E2E VarNet, FI VarNet, and uncertainty network
+  VarNet_module.py            Lightning reconstruction module
+  Network_module.py           Validation, testing, and logging utilities
+  uncertainty_module.py       Uncertainty training, calibration, and testing module
 
 utilities/
-  functions.py                FFTs, complex operations, cropping, saving reconstructions
-  losses.py                   SSIM, perceptual, pinball, and 3D-beta losses
-  evaluation.py               MSE, NMSE, PSNR, SSIM evaluation
+  functions.py                FFTs, complex operations, cropping, and reconstruction saving
+  losses.py                   SSIM and pinball losses
+  evaluation.py               MSE, NMSE, PSNR, and SSIM evaluation
 
-runner.py                     Main reconstruction training/testing entry point
+runner.py                     Reconstruction training/testing entry point
 runner_uncertainty.py         Uncertainty training/calibration/testing entry point
+batch_run.sh                  SLURM launcher for reconstruction and uncertainty jobs
 ```
 
-## 2D VarNet reconstruction
+---
 
-The main reconstruction pipeline supports 2D accelerated MRI reconstruction from undersampled multicoil k-space data.
+## Reconstruction models
 
-Supported reconstruction backbones include:
+The reconstruction pipeline supports two 2D multicoil VarNet backbones.
 
-- `e2e_varnet`
-- `fi_varnet`
+### `e2e_varnet`
 
-The standard reconstruction flow is:
+Standard end-to-end variational network reconstruction:
 
 ```text
 undersampled k-space
@@ -51,40 +53,47 @@ undersampled k-space
     -> cascaded image-domain regularization and data consistency
     -> reconstructed magnitude image
 ```
-The default reconstruction loss is SSIM loss.
+
+### `fi_varnet`
+
+Feature-image VarNet reconstruction. This follows the same broad reconstruction structure but performs part of the regularization in a learned feature-image domain.
+
+The reconstruction loss is SSIM loss.
+
+---
 
 ## Pixelwise uncertainty estimation
 
-The repository includes a separate uncertainty pipeline built on top of a pretrained reconstruction model.
+The uncertainty model is trained after a reconstruction model has already been trained.
 
-The reconstruction model is trained first. Then, during uncertainty training, the reconstruction model is frozen and a separate uncertainty network predicts lower and upper uncertainty bounds around the reconstruction.
+The reconstruction model is frozen, and a separate uncertainty network predicts lower and upper bounds around the VarNet reconstruction. These bounds are trained using pinball loss and then calibrated with conformal prediction.
 
-The uncertainty workflow is:
+The workflow is:
 
 ```text
 train VarNet
+    -> test VarNet and save reconstructions
     -> freeze VarNet
-    -> train uncertainty network
+    -> train uncertainty model
     -> calibrate uncertainty intervals
-    -> test and save uncertainty maps
+    -> test uncertainty model
+    -> append uncertainty maps to reconstruction HDF5 files
 ```
 
-The uncertainty pipeline includes:
+During uncertainty testing, each reconstruction HDF5 file is updated to contain:
 
-1. loading a pretrained reconstruction model
-2. freezing the reconstruction model
-3. training an uncertainty network using quantile regression
-4. using pinball loss for lower and upper quantiles
-5. conformal calibration of the predicted intervals
-6. saving calibrated uncertainty maps during testing
+```text
+reconstruction
+uncertainty_map
+```
 
-This is useful for identifying spatial regions where the reconstructed image is likely to be unreliable.
+---
 
 ## Dataset format
 
 The code expects fastMRI-style HDF5 files.
 
-Typical folder structure:
+A typical folder structure is:
 
 ```text
 /path/to/data/
@@ -101,79 +110,167 @@ Typical folder structure:
     multicoil_test/
 ```
 
-Each HDF5 file should contain multicoil k-space data and the corresponding reconstruction target.
+Each HDF5 file should contain multicoil k-space data and the corresponding RSS reconstruction target.
 
-## Basic usage
+---
 
-Most experiments are launched through `batch_run.sh`.
+## Before running: update `batch_run.sh`
 
-### 2D fixed-mask training
+`batch_run.sh` currently contains local paths from the original development environment. Before running the code on another machine or cluster, update the path section near the top of `batch_run.sh`.
 
-```bash
-sbatch \
-  --job-name=VN_2D_K_4x_train \
-  --export=ALL,EXPERIMENT_DIM=2D,ANATOMY=knee,ACCELERATION=4,MASK_MODE=fixed,FIXED_MASK_TYPE=equispaced_fraction,RUN_TRAINING=true,RUN_TESTING=false,RUN_EVALUATION=false \
-  batch_run.sh
-```
-
-### 2D testing and evaluation
+The main paths to change are:
 
 ```bash
-sbatch \
-  --job-name=VN_2D_K_4x_test \
-  --export=ALL,EXPERIMENT_DIM=2D,ANATOMY=knee,ACCELERATION=4,MASK_MODE=fixed,RUN_TRAINING=false,RUN_TESTING=true,RUN_EVALUATION=true \
-  batch_run.sh
+HOME_DIR=/path/to/project_or_data_root
+VARNET_DIR=/path/to/this/repository
+LOG_PATH=/path/to/output/logs
+DATA_DIR=/path/to/data/${ANATOMY}/
+VN_TRAIN_PATH=/path/to/data/${ANATOMY}/multicoil_train/
+VN_VAL_PATH=/path/to/data/${ANATOMY}/multicoil_val/
+VN_CAL_PATH=/path/to/data/${ANATOMY}/multicoil_cal/
+VN_TEST_PATH=/path/to/data/${ANATOMY}/multicoil_test/
 ```
 
-## Important SLURM variables
+In the current NYU setup, these variables default to paths such as:
+
+```bash
+HOME_DIR=/gpfs/data/lattanzilab/Ilias/NYU_FAST_MRI
+VARNET_DIR=/gpfs/home/gianni02/fastMRI_LabRepo
+LOG_PATH=${HOME_DIR}/logs_detection
+```
+
+For a new user, the two most important variables are:
+
+```bash
+VARNET_DIR=/path/to/cloned/repository
+HOME_DIR=/path/to/data/root
+```
+
+Then the default dataset paths are built automatically from `HOME_DIR` and `ANATOMY`.
+
+You may also need to edit the SLURM header in `batch_run.sh` depending on your cluster:
+
+```bash
+#SBATCH --partition=radiology
+#SBATCH --cpus-per-task=10
+#SBATCH --time=3-00:00:00
+#SBATCH --mem=300G
+#SBATCH --gres=gpu:a100:1
+```
+
+For example, change the partition name, GPU type, memory, or wall time to match your system.
+
+---
+
+## Main `batch_run.sh` variables
 
 Common experiment controls:
 
 ```bash
-EXPERIMENT_DIM=2D
-ANATOMY=knee
-ACCELERATION=4
-MASK_MODE=fixed
+ANATOMY=knee                     # knee or brain
+MODEL_NAME=e2e_varnet            # e2e_varnet or fi_varnet
+ACCELERATION=4                   # acceleration factor
+CENTER_FRACTION=0.08             # optional; inferred if left empty
 FIXED_MASK_TYPE=equispaced_fraction
-TRAIN_MODE=train
-PRECISION=bf16
+PRECISION=32
+BATCH_SIZE=1
+NUM_WORKERS=4
 ```
 
-2D architecture variables:
+Reconstruction architecture variables:
 
 ```bash
-MODEL_NAME_2D=e2e_varnet
-NUM_CASCADES_2D=12
-CHANS_2D=32
-POOLS_2D=4
-SENS_CHANS_2D=8
-SENS_POOLS_2D=4
-VN_LR_2D=0.0003
+NUM_CASCADES=12
+CHANS=32
+POOLS=4
+SENS_CHANS=8
+SENS_POOLS=4
+VN_LR=0.0003
+VN_WEIGHT_DECAY=0.0
+VN_MAX_STEPS=210000
+VN_RAMP_STEPS=7500
+VN_COSINE_DECAY_START=150000
 ```
 
 Uncertainty variables:
 
 ```bash
-RUN_UNCERTAINTY_TRAINING=true
-RUN_UNCERTAINTY_CALIBRATION=true
-RUN_UNCERTAINTY_TESTING=true
-
 UNC_ALPHA=0.1
-UNC_HEAD_CHANS_2D=32
-UNC_HEAD_POOLS_2D=4
-UNC_LR_2D=0.0003
+UNC_HEAD_CHANS=32
+UNC_HEAD_POOLS=4
+UNC_DROP_PROB=0.0
+UNC_LR=0.0003
+UNC_WEIGHT_DECAY=0.0
+UNC_MAX_STEPS=210000
+UNC_RAMP_STEPS=7500
+UNC_COSINE_DECAY_START=150000
 ```
 
-## Training uncertainty
+Calibration variables:
 
-The uncertainty model should be trained after a reconstruction checkpoint exists.
+```bash
+UNC_CAL_DELTA=0.1
+UNC_CAL_LAM_START=1.0
+UNC_CAL_LAM_END=2.0
+UNC_CAL_LAM_STEPS=20
+UNC_CAL_SAMPLE_RATE=1.0
+```
 
-### Train uncertainty network
+Run-control variables:
+
+```bash
+RUN_TRAINING=true
+RUN_TESTING=false
+RUN_EVALUATION=false
+RUN_UNCERTAINTY_TRAINING=false
+RUN_UNCERTAINTY_CALIBRATION=false
+RUN_UNCERTAINTY_TESTING=false
+```
+
+---
+
+## Basic usage
+
+Most experiments are launched through `batch_run.sh`.
+
+### Train a reconstruction model
 
 ```bash
 sbatch \
-  --job-name=VN_2D_K_4x_unc_train \
-  --export=ALL,EXPERIMENT_DIM=2D,ANATOMY=knee,ACCELERATION=4,MASK_MODE=fixed,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=true,RUN_UNCERTAINTY_CALIBRATION=false,RUN_UNCERTAINTY_TESTING=false \
+  --job-name=VN_K_4x_train \
+  --export=ALL,ANATOMY=knee,MODEL_NAME=e2e_varnet,ACCELERATION=4,RUN_TRAINING=true,RUN_TESTING=false,RUN_EVALUATION=false \
+  batch_run.sh
+```
+
+### Test and evaluate a reconstruction model
+
+```bash
+sbatch \
+  --job-name=VN_K_4x_test \
+  --export=ALL,ANATOMY=knee,MODEL_NAME=e2e_varnet,ACCELERATION=4,RUN_TRAINING=false,RUN_TESTING=true,RUN_EVALUATION=true \
+  batch_run.sh
+```
+
+Reconstruction outputs are saved under:
+
+```text
+${LOG_PATH}/${MODEL_NAME}/reconstructions_${VN_MODEL}/
+```
+
+where `VN_MODEL` is generated automatically from the anatomy, model, acceleration, loss, and mask type.
+
+---
+
+## Uncertainty workflow
+
+The uncertainty workflow assumes that a trained reconstruction checkpoint already exists.
+
+### Train uncertainty model
+
+```bash
+sbatch \
+  --job-name=VN_K_4x_unc_train \
+  --export=ALL,ANATOMY=knee,MODEL_NAME=e2e_varnet,ACCELERATION=4,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=true,RUN_UNCERTAINTY_CALIBRATION=false,RUN_UNCERTAINTY_TESTING=false \
   batch_run.sh
 ```
 
@@ -181,40 +278,36 @@ sbatch \
 
 ```bash
 sbatch \
-  --job-name=VN_2D_K_4x_unc_cal \
-  --export=ALL,EXPERIMENT_DIM=2D,ANATOMY=knee,ACCELERATION=4,MASK_MODE=fixed,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=false,RUN_UNCERTAINTY_CALIBRATION=true,RUN_UNCERTAINTY_TESTING=false \
+  --job-name=VN_K_4x_unc_cal \
+  --export=ALL,ANATOMY=knee,MODEL_NAME=e2e_varnet,ACCELERATION=4,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=false,RUN_UNCERTAINTY_CALIBRATION=true,RUN_UNCERTAINTY_TESTING=false \
   batch_run.sh
 ```
 
 ### Test uncertainty model
 
+Run reconstruction testing first so that the reconstruction HDF5 files exist. Then run:
+
 ```bash
 sbatch \
-  --job-name=VN_2D_K_4x_unc_test \
-  --export=ALL,EXPERIMENT_DIM=2D,ANATOMY=knee,ACCELERATION=4,MASK_MODE=fixed,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=false,RUN_UNCERTAINTY_CALIBRATION=false,RUN_UNCERTAINTY_TESTING=true \
+  --job-name=VN_K_4x_unc_test \
+  --export=ALL,ANATOMY=knee,MODEL_NAME=e2e_varnet,ACCELERATION=4,RUN_TRAINING=false,RUN_TESTING=false,RUN_EVALUATION=false,RUN_UNCERTAINTY_TRAINING=false,RUN_UNCERTAINTY_CALIBRATION=false,RUN_UNCERTAINTY_TESTING=true \
   batch_run.sh
 ```
 
-## Outputs
+This appends `uncertainty_map` to the reconstruction files saved by the reconstruction test step.
 
-Reconstruction outputs are saved as HDF5 files containing:
+---
 
-```text
-reconstruction
+## Direct Python entry points
+
+The SLURM launcher is the recommended workflow, but the Python entry points are:
+
+```bash
+python3 runner.py --help
+python3 runner_uncertainty.py --help
 ```
 
-Uncertainty testing saves or appends uncertainty maps depending on the selected pipeline.
-
-## Evaluation
-
-The evaluation script computes:
-
-- MSE
-- NMSE
-- PSNR
-- SSIM
-
-Example:
+Evaluation can be run directly with:
 
 ```bash
 python3 -m utilities.evaluation \
@@ -222,24 +315,45 @@ python3 -m utilities.evaluation \
   --predictions-path /path/to/reconstructions
 ```
 
-## Recommended starting point
+---
 
-For a stable first experiment, start with:
+## Recommended first run
+
+A stable first experiment is:
 
 ```bash
-EXPERIMENT_DIM=2D
-MODEL_NAME_2D=e2e_varnet
-MASK_MODE=fixed
+ANATOMY=knee
+MODEL_NAME=e2e_varnet
 ACCELERATION=4
-LOSS_FLAG_2D=ssim
+FIXED_MASK_TYPE=equispaced_fraction
+PRECISION=32
 ```
 
-Then test the VN.  
+Recommended sequence:
 
-Finally, train and calibrate uncertainty on top of the trained reconstruction checkpoint.
+1. Train the reconstruction model.
+2. Test the reconstruction model.
+3. Evaluate reconstruction metrics.
+4. Train the uncertainty model.
+5. Calibrate uncertainty intervals.
+6. Test uncertainty and append uncertainty maps.
 
-## Citation
-- For the original E2E VarNet implementation repository please refer to https://github.com/facebookresearch/fastMRI
-- If you use the E2E VarNet please cite Sriram, Anuroop, et al. "End-to-end variational networks for accelerated MRI reconstruction." International conference on medical image computing and computer-assisted intervention. Cham: Springer International Publishing, 2020.
-- If you use the FI VarNet please cite Giannakopoulos, Ilias I., et al. "Accelerated MRI reconstructions via variational network and feature domain learning." Scientific Reports 14.1 (2024): 10991.
-- If you use the Uncertainty please cite Giannakopoulos, Ilias I., et al. "Pixelwise Uncertainty Quantification of Accelerated MRI Reconstruction." arXiv preprint arXiv:2601.13236 (2026).
+---
+
+## Citations
+
+For the original E2E VarNet implementation, refer to:
+
+- https://github.com/facebookresearch/fastMRI
+
+If you use E2E VarNet, cite:
+
+- Sriram, Anuroop, et al. "End-to-end variational networks for accelerated MRI reconstruction." International Conference on Medical Image Computing and Computer-Assisted Intervention. Springer, 2020.
+
+If you use FI VarNet, cite:
+
+- Giannakopoulos, Ilias I., et al. "Accelerated MRI reconstructions via variational network and feature domain learning." Scientific Reports 14.1 (2024): 10991.
+
+If you use the uncertainty method, cite:
+
+- Giannakopoulos, Ilias I., et al. "Pixelwise Uncertainty Quantification of Accelerated MRI Reconstruction." arXiv preprint arXiv:2601.13236 (2026).
