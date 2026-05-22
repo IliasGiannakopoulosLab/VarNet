@@ -38,7 +38,6 @@ class UncertaintyModule(pl.LightningModule):
         self,
         varnet_model: torch.nn.Module,
         uncertainty_model: torch.nn.Module,
-        learnable_mask: bool = False,
         model_name: str = "default_uncertainty_model",
         # -------- varnet checkpoint loading --------
         varnet_ckpt: Optional[Path] = None,
@@ -70,7 +69,6 @@ class UncertaintyModule(pl.LightningModule):
 
         self.varnet_model = varnet_model
         self.uncertainty_model = uncertainty_model
-        self.learnable_mask = learnable_mask
         self.model_name = model_name
 
         self.lr = lr
@@ -203,21 +201,12 @@ class UncertaintyModule(pl.LightningModule):
         # so we force the frozen reconstruction backbone to stay in eval mode.
         self.varnet_model.eval()
 
-        if self.learnable_mask:
-            recon = self.varnet_model(
-                full_kspace=batch.full_kspace,
-                acq_start=batch.acq_start,
-                acq_end=batch.acq_end,
-                crop_size=batch.crop_size,
-                return_mask_extras=False,
-            )
-        else:
-            recon = self.varnet_model(
-                batch.masked_kspace,
-                batch.mask,
-                batch.num_low_frequencies,
-                crop_size=batch.crop_size,
-            )
+        recon = self.varnet_model(
+            batch.masked_kspace,
+            batch.mask,
+            batch.num_low_frequencies,
+            crop_size=batch.crop_size,
+        )
 
         if isinstance(recon, tuple):
             raise ValueError(
