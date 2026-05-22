@@ -342,3 +342,15 @@ If you use FI VarNet, cite:
 If you use the uncertainty method, cite:
 
 - Giannakopoulos, Ilias I., et al. "Pixelwise Uncertainty Quantification of Accelerated MRI Reconstruction." arXiv preprint arXiv:2601.13236 (2026).
+
+## Issues and Disclaimer
+
+This is an in-house MRI reconstruction codebase intended for research purposes. While every effort has been made to ensure its quality, the code may contain bugs or unexpected behavior. We do not assume responsibility for any errors, issues, data loss, or conclusions resulting from the software's use.
+
+Users are encouraged to report problems, ask questions, or suggest improvements by contacting:
+
+**ilias[dot]giannakopoulos[at]nyulangone[dot]org**
+
+## Acknowledgments
+
+This work was supported in part by the National Institutes of Health (NIBIB) under awards **K99 EB035163** and **R01 EB024536**.
