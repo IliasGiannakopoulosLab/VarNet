@@ -11,19 +11,14 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from data.data_module import DataModule
-from data.data_transforms import VarNetDataTransform, VolumeVarNetDataTransform
+from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
 from varnets.VarNet import (
     E2EVarNet,
-    E2EVarNet3D,
     FIVarNet,
-    LearnableMaskedVarNet,
-    LearnableMaskedVarNet3D,
     UncertaintyNetwork,
-    UncertaintyNetwork3D,
 )
 from varnets.uncertainty_module import UncertaintyModule
-from varnets.uncertainty_module_3D import UncertaintyModule3D
 
 
 torch.set_float32_matmul_precision("high")
@@ -90,9 +85,6 @@ def _get_varnet_state_dict_from_checkpoint(
     if module_name:
         prefixes_to_try.append(module_name)
 
-    # 2D checkpoints are usually under fi_varnet.; 3D checkpoints are usually
-    # under varnet.  Try both so the runner is tolerant to the compatibility
-    # alias used in VarNetModule3D.
     for prefix in ("fi_varnet.", "varnet."):
         if prefix not in prefixes_to_try:
             prefixes_to_try.append(prefix)
@@ -102,8 +94,6 @@ def _get_varnet_state_dict_from_checkpoint(
         if len(filtered) > 0:
             return filtered
 
-    # Last resort: allow users to pass a raw model state_dict without a module
-    # prefix.  This is useful for slim/exported reconstruction checkpoints.
     if any(k.startswith("base_varnet.") for k in state_dict.keys()):
         return state_dict
 
@@ -131,45 +121,11 @@ def load_varnet_weights_only(
 
     return model
 
-
-def _get_single_learnable_mask_params(args):
-    if len(args.accelerations) != 1:
-        raise ValueError(
-            "Learnable mask mode currently requires exactly one acceleration."
-        )
-    if len(args.center_fractions) != 1:
-        raise ValueError(
-            "Learnable mask mode currently requires exactly one center fraction."
-        )
-
-    acceleration = int(args.accelerations[0])
-    center_fraction = float(args.center_fractions[0])
-
-    return acceleration, center_fraction
-
-
 # ============================================================
 # MODEL BUILDERS
 # ============================================================
 def build_base_varnet(args, acceleration: int):
-    if _is_volume_mode(args):
-        if args.varnet_type != "e2e_varnet":
-            raise ValueError(
-                "dataset_format='volume' currently supports only varnet_type='e2e_varnet'. "
-                "FIVarNet3D is not implemented."
-            )
-
-        print(f"BUILDING 3D E2E VARNET, chans={args.chans}")
-        return E2EVarNet3D(
-            num_cascades=args.num_cascades,
-            pools=args.pools,
-            chans=args.chans,
-            sens_pools=args.sens_pools,
-            sens_chans=args.sens_chans,
-            kernel_size=tuple(args.kernel_size),
-            pool_kernel_size=tuple(args.pool_kernel_size),
-        )
-
+    
     if args.varnet_type == "fi_varnet":
         print(f"BUILDING FI VARNET, chans={args.chans}")
         return FIVarNet(
@@ -195,52 +151,13 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_varnet_model(args):
-    if args.mask_mode == "learnable":
-        acceleration, center_fraction = _get_single_learnable_mask_params(args)
-        base_varnet = build_base_varnet(args, acceleration=acceleration)
-
-        if _is_volume_mode(args):
-            print(
-                f"WRAPPING 3D E2E VARNET WITH LEARNABLE 2D CARTESIAN MASK, "
-                f"acceleration={acceleration}, center_fraction={center_fraction}, "
-                f"num_slice_logits={args.num_slice_logits}, "
-                f"num_phase_logits={args.num_logits}"
-            )
-
-            return LearnableMaskedVarNet3D(
-                base_varnet=base_varnet,
-                acceleration=acceleration,
-                center_fraction=center_fraction,
-                num_phase_logits=args.num_logits,
-                num_slice_logits=args.num_slice_logits,
-            )
-
-        print(
-            f"WRAPPING WITH LEARNABLE CARTESIAN MASK, "
-            f"acceleration={acceleration}, center_fraction={center_fraction}"
-        )
-
-        return LearnableMaskedVarNet(
-            base_varnet=base_varnet,
-            acceleration=acceleration,
-            center_fraction=center_fraction,
-            num_logits=args.num_logits,
-        )
-
+    
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
 
 
 def fetch_uncertainty_model(args):
-    if _is_volume_mode(args):
-        return UncertaintyNetwork3D(
-            head_chans=args.head_chans,
-            head_pools=args.head_pools,
-            drop_prob=args.uncertainty_drop_prob,
-            kernel_size=tuple(args.uncertainty_kernel_size),
-            pool_kernel_size=tuple(args.uncertainty_pool_kernel_size),
-        )
-
+    
     return UncertaintyNetwork(
         head_chans=args.head_chans,
         head_pools=args.head_pools,
@@ -252,30 +169,7 @@ def fetch_uncertainty_model(args):
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
-    transform_cls = VolumeVarNetDataTransform if _is_volume_mode(args) else VarNetDataTransform
-
-    if args.mask_mode == "learnable":
-        train_transform = transform_cls(
-            mask_func=None,
-            use_seed=False,
-            learnable_mask=True,
-        )
-        val_transform = transform_cls(
-            mask_func=None,
-            use_seed=True,
-            learnable_mask=True,
-        )
-        cal_transform = transform_cls(
-            mask_func=None,
-            use_seed=True,
-            learnable_mask=True,
-        )
-        test_transform = transform_cls(
-            mask_func=None,
-            use_seed=True,
-            learnable_mask=True,
-        )
-        return train_transform, val_transform, cal_transform, test_transform
+    transform_cls = VarNetDataTransform
 
     mask = create_mask_for_mask_type(
         args.mask_type,
@@ -360,10 +254,6 @@ def cli_main(args):
         val_sample_rate=args.val_sample_rate,
         cal_sample_rate=args.cal_sample_rate,
         test_sample_rate=args.test_sample_rate,
-        volume_sample_rate=args.volume_sample_rate,
-        val_volume_sample_rate=args.val_volume_sample_rate,
-        cal_volume_sample_rate=args.cal_volume_sample_rate,
-        test_volume_sample_rate=args.test_volume_sample_rate,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         distributed_sampler=(args.accelerator in ("ddp", "ddp_cpu")),
@@ -379,45 +269,24 @@ def cli_main(args):
 
     uncertainty_model = fetch_uncertainty_model(args)
 
-    if _is_volume_mode(args):
-        pl_module = UncertaintyModule3D(
-            varnet_model=varnet_model,
-            uncertainty_model=uncertainty_model,
-            learnable_mask=(args.mask_mode == "learnable"),
-            model_name=args.model_name,
-            varnet_ckpt=None,
-            lr=args.lr,
-            lr_step_size=args.lr_step_size,
-            lr_gamma=args.lr_gamma,
-            weight_decay=args.weight_decay,
-            alpha=args.alpha,
-            calibration_delta=args.calibration_delta,
-            calibration_lambdas_start=args.calibration_lambdas_start,
-            calibration_lambdas_end=args.calibration_lambdas_end,
-            calibration_lambdas_steps=args.calibration_lambdas_steps,
-            calibration_sample_rate=args.calibration_sample_rate,
-            reconstructions_dir=args.reconstructions_dir,
-        )
-    else:
-        pl_module = UncertaintyModule(
-            varnet_model=varnet_model,
-            uncertainty_model=uncertainty_model,
-            learnable_mask=(args.mask_mode == "learnable"),
-            model_name=args.model_name,
-            varnet_ckpt=None,
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-            max_steps=args.max_steps,
-            ramp_steps=args.ramp_steps,
-            cosine_decay_start=args.cosine_decay_start,
-            alpha=args.alpha,
-            calibration_delta=args.calibration_delta,
-            calibration_lambdas_start=args.calibration_lambdas_start,
-            calibration_lambdas_end=args.calibration_lambdas_end,
-            calibration_lambdas_steps=args.calibration_lambdas_steps,
-            calibration_sample_rate=args.calibration_sample_rate,
-            reconstructions_dir=args.reconstructions_dir,
-        )
+    pl_module = UncertaintyModule(
+        varnet_model=varnet_model,
+        uncertainty_model=uncertainty_model,
+        model_name=args.model_name,
+        varnet_ckpt=None,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        max_steps=args.max_steps,
+        ramp_steps=args.ramp_steps,
+        cosine_decay_start=args.cosine_decay_start,
+        alpha=args.alpha,
+        calibration_delta=args.calibration_delta,
+        calibration_lambdas_start=args.calibration_lambdas_start,
+        calibration_lambdas_end=args.calibration_lambdas_end,
+        calibration_lambdas_steps=args.calibration_lambdas_steps,
+        calibration_sample_rate=args.calibration_sample_rate,
+        reconstructions_dir=args.reconstructions_dir,
+    )
 
     checkpoint_dir = args.default_root_dir / "checkpoints" / f"{args.model_name}"
     callbacks = []
@@ -455,7 +324,6 @@ def cli_main(args):
         raise ValueError(f"Unsupported mode: {args.mode}")
 
     args.resume_from_checkpoint = None
-    if _is_volume_mode(args): args.log_every_n_steps = 1
     trainer = pl.Trainer.from_argparse_args(args, callbacks=callbacks)
 
     if args.mode == "train":
@@ -508,7 +376,7 @@ def build_args(cluster_launch: bool = True):
     # fixed vs learnable mask mode
     parser.add_argument(
         "--mask_mode",
-        choices=("fixed", "learnable"),
+        choices=("fixed"),
         default="fixed",
         type=str,
     )
@@ -516,7 +384,7 @@ def build_args(cluster_launch: bool = True):
     # fixed-mask options
     parser.add_argument(
         "--mask_type",
-        choices=("equispaced_fraction", "equispaced", "edge_dominant"),
+        choices=("equispaced_fraction", "equispaced"),
         default="equispaced_fraction",
         type=str,
     )
@@ -524,11 +392,6 @@ def build_args(cluster_launch: bool = True):
     # shared sampling targets
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
-
-    # learnable-mask options.  For 3D, --num_logits is the ky resolution and
-    # --num_slice_logits is the canonical slice-axis resolution.
-    parser.add_argument("--num_logits", type=int, default=320)
-    parser.add_argument("--num_slice_logits", type=int, default=40)
 
     # reconstruction architecture
     parser.add_argument(
@@ -551,12 +414,9 @@ def build_args(cluster_launch: bool = True):
     if args.log_path is None:
         raise ValueError("--log_path must be provided.")
 
-    if args.dataset_format == "volume":
-        default_root_dir = args.log_path / "e2e_varnet_3d" / "uncertainty"
-        uncertainty_arg_adder = UncertaintyModule3D.add_model_specific_args
-    else:
-        default_root_dir = args.log_path / args.varnet_type / "uncertainty"
-        uncertainty_arg_adder = UncertaintyModule.add_model_specific_args
+    
+    default_root_dir = args.log_path / args.varnet_type / "uncertainty"
+    uncertainty_arg_adder = UncertaintyModule.add_model_specific_args
 
     parser = uncertainty_arg_adder(parser)
 
@@ -584,13 +444,13 @@ def build_args(cluster_launch: bool = True):
         batch_size=1,
         test_path=None,
         combine_train_val=True,
-        varnet_type="e2e_varnet" if args.dataset_format == "volume" else args.varnet_type,
+        varnet_type=args.varnet_type,
     )
 
     args = parser.parse_args()
 
     if args.varnet_ckpt_prefix is None:
-        args.varnet_ckpt_prefix = "varnet." if _is_volume_mode(args) else "fi_varnet."
+        args.varnet_ckpt_prefix = "fi_varnet."
 
     args.logger = TensorBoardLogger(
         save_dir=args.default_root_dir,
