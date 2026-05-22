@@ -131,21 +131,6 @@ VN_CAL_PATH=/path/to/data/${ANATOMY}/multicoil_cal/
 VN_TEST_PATH=/path/to/data/${ANATOMY}/multicoil_test/
 ```
 
-In the current NYU setup, these variables default to paths such as:
-
-```bash
-HOME_DIR=/gpfs/data/lattanzilab/Ilias/NYU_FAST_MRI
-VARNET_DIR=/gpfs/home/gianni02/fastMRI_LabRepo
-LOG_PATH=${HOME_DIR}/logs_detection
-```
-
-For a new user, the two most important variables are:
-
-```bash
-VARNET_DIR=/path/to/cloned/repository
-HOME_DIR=/path/to/data/root
-```
-
 Then the default dataset paths are built automatically from `HOME_DIR` and `ANATOMY`.
 
 You may also need to edit the SLURM header in `batch_run.sh` depending on your cluster:
