@@ -167,79 +167,6 @@ class EquispacedMaskFractionFunc(MaskFunc):
 
         return mask
 
-class EdgeDominantMaskFunc(MaskFunc):
-    """
-    Edge-dominant variable-density mask:
-      - center determined by center_fraction
-      - edge-biased adaptive sampling outside center
-      - exact acceleration preserved
-    """
-
-    def calculate_acceleration_mask(
-        self,
-        num_cols: int,
-        acceleration: int,
-        offset: Optional[int],
-        num_low_frequencies: int,
-    ) -> np.ndarray:
-
-        total_samples = round(num_cols / acceleration)
-
-        # remaining samples outside center
-        remaining = total_samples - num_low_frequencies
-
-        if remaining <= 0:
-            return np.zeros(num_cols, dtype=np.float32)
-
-        left_needed = int(np.ceil(remaining / 2))
-        right_needed = int(np.floor(remaining / 2))
-
-        mask = np.zeros(num_cols, dtype=np.float32)
-
-        center_start = (num_cols - num_low_frequencies + 1) // 2
-        center_end = center_start + num_low_frequencies
-
-        # ---------------- LEFT SIDE ----------------
-        left_positions = []
-        pos = 0
-        gap = 2
-
-        while len(left_positions) < left_needed and pos < center_start:
-            left_positions.append(pos)
-            pos += gap
-            gap = min(gap + 1, acceleration + 2)
-
-        # fill remaining if needed
-        candidate = center_start - 1
-        while len(left_positions) < left_needed:
-            if candidate not in left_positions:
-                left_positions.append(candidate)
-            candidate -= 1
-
-        left_positions = sorted(left_positions[:left_needed])
-
-        # ---------------- RIGHT SIDE ----------------
-        right_positions = []
-        pos = num_cols - 1
-        gap = 2
-
-        while len(right_positions) < right_needed and pos >= center_end:
-            right_positions.append(pos)
-            pos -= gap
-            gap = min(gap + 1, acceleration + 2)
-
-        candidate = center_end
-        while len(right_positions) < right_needed:
-            if candidate not in right_positions:
-                right_positions.append(candidate)
-            candidate += 1
-
-        right_positions = sorted(right_positions[:right_needed])
-
-        mask[left_positions] = 1.0
-        mask[right_positions] = 1.0
-
-        return mask
 
 # -------------------------------------------#
 # -------- create mask for mask type ------- #
@@ -254,7 +181,5 @@ def create_mask_for_mask_type(
         return EquiSpacedMaskFunc(center_fractions, accelerations)
     elif mask_type_str == "equispaced_fraction":
         return EquispacedMaskFractionFunc(center_fractions, accelerations)
-    elif mask_type_str == "edge_dominant":
-        return EdgeDominantMaskFunc(center_fractions, accelerations)
     else:
         raise ValueError(f"{mask_type_str} not supported")
