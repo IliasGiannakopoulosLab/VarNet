@@ -1,4 +1,3 @@
-import os
 import subprocess
 from argparse import ArgumentParser
 from pathlib import Path
@@ -13,11 +12,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from data.data_module import DataModule
 from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
-from varnets.VarNet import (
-    E2EVarNet,
-    FIVarNet,
-    UncertaintyNetwork,
-)
+from varnets.VarNet import E2EVarNet, FIVarNet, UncertaintyNetwork
 from varnets.uncertainty_module import UncertaintyModule
 
 
@@ -31,38 +26,6 @@ def check_gpu_availability() -> int:
     command = "nvidia-smi --query-gpu=index --format=csv,noheader | wc -l"
     output = subprocess.check_output(command, shell=True).decode("utf-8").strip()
     return int(output)
-
-
-def _is_volume_mode(args) -> bool:
-    return getattr(args, "dataset_format", "slice") == "volume"
-
-
-def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
-    """
-    Adapts checkpoint keys for wrapped learnable-mask models.
-
-    Cases handled:
-      source checkpoint = plain VarNet
-      target model      = LearnableMaskedVarNet(...)
-
-    Then we remap:
-      conv.weight -> base_varnet.conv.weight
-
-    If the source checkpoint is already a learnable-mask wrapper, the keys are
-    left unchanged after the Lightning-module prefix is removed.
-    """
-    target_keys = set(model.state_dict().keys())
-
-    target_is_wrapper = any(k.startswith("base_varnet.") for k in target_keys)
-    source_is_wrapper = any(
-        k.startswith("base_varnet.") or k.startswith("learnable_mask.")
-        for k in state_dict.keys()
-    )
-
-    if target_is_wrapper and not source_is_wrapper:
-        state_dict = {f"base_varnet.{k}": v for k, v in state_dict.items()}
-
-    return state_dict
 
 
 def _filter_state_dict_by_prefix(state_dict: dict, module_name: str) -> dict:
@@ -94,9 +57,6 @@ def _get_varnet_state_dict_from_checkpoint(
         if len(filtered) > 0:
             return filtered
 
-    if any(k.startswith("base_varnet.") for k in state_dict.keys()):
-        return state_dict
-
     raise RuntimeError(
         f"No VarNet weights found in {weight_path}. "
         f"Tried prefixes: {prefixes_to_try}."
@@ -112,7 +72,6 @@ def load_varnet_weights_only(
         weight_path=weight_path,
         module_name=module_name,
     )
-    filtered = _adapt_state_dict_for_model(model, filtered)
 
     missing, unexpected = model.load_state_dict(filtered, strict=False)
     print("load_varnet_weights_only:")
@@ -121,11 +80,11 @@ def load_varnet_weights_only(
 
     return model
 
+
 # ============================================================
 # MODEL BUILDERS
 # ============================================================
 def build_base_varnet(args, acceleration: int):
-    
     if args.varnet_type == "fi_varnet":
         print(f"BUILDING FI VARNET, chans={args.chans}")
         return FIVarNet(
@@ -151,13 +110,11 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_varnet_model(args):
-    
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
 
 
 def fetch_uncertainty_model(args):
-    
     return UncertaintyNetwork(
         head_chans=args.head_chans,
         head_pools=args.head_pools,
@@ -169,22 +126,20 @@ def fetch_uncertainty_model(args):
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
-    transform_cls = VarNetDataTransform
-
     mask = create_mask_for_mask_type(
         args.mask_type,
         args.center_fractions,
         args.accelerations,
     )
 
-    train_transform = transform_cls(mask_func=mask, use_seed=False)
-    val_transform = transform_cls(mask_func=mask)
-    cal_transform = transform_cls(mask_func=mask)
+    train_transform = VarNetDataTransform(mask_func=mask, use_seed=False)
+    val_transform = VarNetDataTransform(mask_func=mask)
+    cal_transform = VarNetDataTransform(mask_func=mask)
 
     if args.mode == "test_val":
-        test_transform = transform_cls(mask_func=mask)
+        test_transform = VarNetDataTransform(mask_func=mask)
     else:
-        test_transform = transform_cls()
+        test_transform = VarNetDataTransform()
 
     return train_transform, val_transform, cal_transform, test_transform
 
@@ -257,7 +212,6 @@ def cli_main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         distributed_sampler=(args.accelerator in ("ddp", "ddp_cpu")),
-        dataset_format=args.dataset_format,
     )
 
     varnet_model = fetch_varnet_model(args)
@@ -366,22 +320,12 @@ def build_args(cluster_launch: bool = True):
         type=str,
     )
 
-    # reconstruction model checkpoint / outputs
     parser.add_argument("--varnet_ckpt", type=Path, default=None)
     parser.add_argument("--varnet_ckpt_prefix", type=str, default=None)
     parser.add_argument("--uncertainty_ckpt", type=Path, default=None)
     parser.add_argument("--output_uncertainty_ckpt", type=Path, default=None)
     parser.add_argument("--reconstructions_dir", type=Path, default=None)
 
-    # fixed vs learnable mask mode
-    parser.add_argument(
-        "--mask_mode",
-        choices=("fixed"),
-        default="fixed",
-        type=str,
-    )
-
-    # fixed-mask options
     parser.add_argument(
         "--mask_type",
         choices=("equispaced_fraction", "equispaced"),
@@ -389,45 +333,33 @@ def build_args(cluster_launch: bool = True):
         type=str,
     )
 
-    # shared sampling targets
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
 
-    # reconstruction architecture
     parser.add_argument(
         "--varnet_type",
         choices=("fi_varnet", "e2e_varnet"),
         default="fi_varnet",
     )
 
-    # uncertainty network architecture
     parser.add_argument("--head_chans", type=int, default=32)
     parser.add_argument("--head_pools", type=int, default=4)
     parser.add_argument("--uncertainty_drop_prob", type=float, default=0.0)
-    parser.add_argument("--uncertainty_kernel_size", nargs=3, type=int, default=[3, 3, 3])
-    parser.add_argument("--uncertainty_pool_kernel_size", nargs=3, type=int, default=[2, 2, 2])
 
     parser = DataModule.add_data_specific_args(parser)
 
-    # Need a first parse to determine slice/volume mode and default root dir.
     args, _ = parser.parse_known_args()
     if args.log_path is None:
         raise ValueError("--log_path must be provided.")
 
-    
     default_root_dir = args.log_path / args.varnet_type / "uncertainty"
-    uncertainty_arg_adder = UncertaintyModule.add_model_specific_args
+    parser = UncertaintyModule.add_model_specific_args(parser)
 
-    parser = uncertainty_arg_adder(parser)
-
-    # reconstruction architecture defaults required to rebuild the frozen VarNet
     parser.add_argument("--num_cascades", type=int, default=12)
     parser.add_argument("--pools", type=int, default=4)
     parser.add_argument("--chans", type=int, default=32)
     parser.add_argument("--sens_pools", type=int, default=4)
     parser.add_argument("--sens_chans", type=int, default=8)
-    parser.add_argument("--kernel_size", nargs=3, type=int, default=[3, 3, 3])
-    parser.add_argument("--pool_kernel_size", nargs=3, type=int, default=[2, 2, 2])
 
     parser = pl.Trainer.add_argparse_args(parser)
     parser.set_defaults(
