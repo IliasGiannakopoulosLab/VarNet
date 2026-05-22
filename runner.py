@@ -12,10 +12,8 @@ from data.data_module import DataModule
 from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
 from varnets.VarNet_module import FIVarNetModule
-from varnets.VarNet import (
-    E2EVarNet,
-    FIVarNet,
-)
+from varnets.VarNet import E2EVarNet, FIVarNet
+
 
 torch.set_float32_matmul_precision("high")
 
@@ -105,6 +103,7 @@ class GPUMemoryPrintCallback(pl.Callback):
     ):
         self._print_memory(trainer, stage="val")
 
+
 # ============================================================
 # UTILS
 # ============================================================
@@ -112,31 +111,6 @@ def check_gpu_availability():
     command = "nvidia-smi --query-gpu=index --format=csv,noheader | wc -l"
     output = subprocess.check_output(command, shell=True).decode("utf-8").strip()
     return int(output)
-
-
-def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
-    """
-    Adapts checkpoint keys for wrapped learnable-mask models.
-
-    Case handled:
-      source checkpoint = plain VarNet
-      target model      = LearnableMaskedVarNet(base_varnet=...)
-
-    Then we remap:
-      conv.weight  -> base_varnet.conv.weight
-    """
-    target_keys = set(model.state_dict().keys())
-
-    target_is_wrapper = any(k.startswith("base_varnet.") for k in target_keys)
-    source_is_wrapper = any(
-        k.startswith("base_varnet.") or k.startswith("learnable_mask.")
-        for k in state_dict.keys()
-    )
-
-    if target_is_wrapper and not source_is_wrapper:
-        state_dict = {f"base_varnet.{k}": v for k, v in state_dict.items()}
-
-    return state_dict
 
 
 def _filter_state_dict_by_prefix(state_dict: dict, module_name: str) -> dict:
@@ -180,7 +154,6 @@ def load_weights_only(
         weight_path=weight_path,
         module_name=module_name,
     )
-    filtered = _adapt_state_dict_for_model(module.fi_varnet, filtered)
 
     missing, unexpected = module.fi_varnet.load_state_dict(filtered, strict=False)
     print("load_weights_only:")
@@ -201,16 +174,15 @@ def reload_state_dict(
         weight_path=fname,
         module_name=module_name,
     )
-    state_dict = _adapt_state_dict_for_model(module.fi_varnet, state_dict)
     module.fi_varnet.load_state_dict(state_dict, strict=False)
 
     return module
+
 
 # ============================================================
 # MODEL BUILDERS
 # ============================================================
 def build_base_varnet(args, acceleration: int):
-    
     if args.varnet_type == "fi_varnet":
         print(f"BUILDING FI VARNET, chans={args.chans}")
         return FIVarNet(
@@ -236,7 +208,6 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_model(args):
-
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
 
@@ -246,64 +217,32 @@ def fetch_lightning_module(args):
 
     return FIVarNetModule(
         fi_varnet=model,
-        learnable_mask=(args.mask_mode == "learnable"),
         lr=args.lr,
-        lr_base=args.lr_base,
-        lr_mask=args.lr_mask,
         model_name=args.model_name,
         weight_decay=args.weight_decay,
         max_steps=args.max_steps,
         ramp_steps=args.ramp_steps,
         cosine_decay_start=args.cosine_decay_start,
-        yolo_cfg=args.yolo_cfg,
-        yolo_repo=args.yolo_repo,
-        yolo_weights=args.yolo_weights,
-        yolo_flag=args.yolo_flag,
-        device=args.device,
-        imgsz=tuple(args.imgsz),
-        half=args.half,
-        pl_weight=args.pl_weight,
-        feature_layers=args.feature_layers,
-        layer_weights=args.layer_weights,
     )
+
 
 # ============================================================
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
-    transform_cls = VarNetDataTransform
-
-    if args.mask_mode == "learnable":
-        train_transform = transform_cls(
-            mask_func=None,
-            use_seed=False,
-            learnable_mask=True,
-        )
-        val_transform = transform_cls(
-            mask_func=None,
-            use_seed=True,
-            learnable_mask=True,
-        )
-        test_transform = transform_cls(
-            mask_func=None,
-            use_seed=True,
-            learnable_mask=True,
-        )
-        return train_transform, val_transform, test_transform
-
     mask = create_mask_for_mask_type(
         args.mask_type,
         args.center_fractions,
         args.accelerations,
     )
 
-    train_transform = transform_cls(mask_func=mask, use_seed=False)
-    val_transform = transform_cls(mask_func=mask)
+    train_transform = VarNetDataTransform(mask_func=mask, use_seed=False)
+    val_transform = VarNetDataTransform(mask_func=mask)
 
     if args.mode == "test_val":
-        test_transform = transform_cls(mask_func=mask)
+        test_transform = VarNetDataTransform(mask_func=mask)
     else:
-        test_transform = transform_cls()
+        test_transform = VarNetDataTransform()
 
     return train_transform, val_transform, test_transform
 
@@ -319,8 +258,6 @@ def cli_main(args):
 
     if original_mode == "test_val":
         args.mode = "test"
-        if hasattr(args, "yolo_flag"):
-            args.yolo_flag = 0
 
     data_module = DataModule(
         data_path=args.data_path,
@@ -339,18 +276,16 @@ def cli_main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         distributed_sampler=(args.accelerator in ("ddp", "ddp_cpu")),
-        dataset_format=args.dataset_format,
     )
 
     pl_module = fetch_lightning_module(args)
     resume_ckpt = args.resume_from_checkpoint
 
     if args.mode == "fine_tune":
-        ckpt_prefix = "varnet." if _is_volume_mode(args) else "fi_varnet."
         pl_module = load_weights_only(
             pl_module,
             Path(args.fine_tune_ckpt),
-            module_name=ckpt_prefix,
+            module_name="fi_varnet.",
         )
         ckpt_path = None
     elif args.mode == "train":
@@ -361,7 +296,6 @@ def cli_main(args):
         raise ValueError(f"Unsupported mode: {args.mode}")
 
     args.resume_from_checkpoint = None
-    if _is_volume_mode(args): args.log_every_n_steps = 1
     trainer = pl.Trainer.from_argparse_args(
         args,
         callbacks=args.callbacks,
@@ -399,13 +333,6 @@ def build_args(cluster_launch: bool = True):
     )
 
     parser.add_argument(
-        "--mask_mode",
-        choices=("fixed"),
-        default="fixed",
-        type=str,
-    )
-
-    parser.add_argument(
         "--mask_type",
         choices=("equispaced_fraction", "equispaced"),
         default="equispaced_fraction",
@@ -415,7 +342,6 @@ def build_args(cluster_launch: bool = True):
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
 
-    # GPU memory debug printing. Set to 0 to disable.
     parser.add_argument("--gpu_mem_log_every", type=int, default=0)
     parser.add_argument("--gpu_mem_log_all_ranks", action="store_true")
 
@@ -427,7 +353,6 @@ def build_args(cluster_launch: bool = True):
 
     parser = DataModule.add_data_specific_args(parser)
 
-    # First pass: decide which model module owns the architecture args and log root.
     args, _ = parser.parse_known_args()
     if args.log_path is None:
         raise ValueError("--log_path must be provided.")
