@@ -181,24 +181,6 @@ def save_reconstructions(reconstructions: Dict[str, dict], out_dir: Path):
         with h5py.File(out_dir / fname, "w") as hf:
             hf.create_dataset("reconstruction", data=item["reconstruction"])
 
-            if "mask_1d" in item:
-                hf.create_dataset("mask_1d", data=item["mask_1d"])
-
-            if "mask_2d" in item:
-                hf.create_dataset("mask_2d", data=item["mask_2d"])
-
-            if "support_width" in item:
-                hf.create_dataset("support_width", data=item["support_width"])
-
-            if "effective_acceleration" in item:
-                hf.create_dataset("effective_acceleration", data=item["effective_acceleration"])
-
-            if "acq_start" in item:
-                hf.create_dataset("acq_start", data=item["acq_start"])
-
-            if "acq_end" in item:
-                hf.create_dataset("acq_end", data=item["acq_end"])
-
 
 # -------------------------------------------#
 # -------- convert fnames to v2 ------------ #
@@ -221,36 +203,6 @@ def normalize_image(image):
     if max_val > min_val:
         image = (image - min_val) / (max_val - min_val)
     return image
-
-
-# -------------------------------------------#
-# -------- preprocess for yolo batch ------- #
-# -------------------------------------------#
-def preprocess_for_yolo_batch(x, imgsz):
-    from yolov5.utils.augmentations import letterbox
-
-    if x.dim() == 3:
-        x = x.unsqueeze(1)
-
-    B = x.shape[0]
-    out = []
-
-    for i in range(B):
-        img = x[i]
-
-        img = normalize_image(img)
-        img = img.flip(-2)
-
-        img = img.squeeze(0).detach().cpu().numpy()
-        img = (img * 255.0).clip(0,255).astype(np.uint8)
-        img = np.repeat(img[...,None], 3, axis=2)
-
-        lb, _, _ = letterbox(img, new_shape=imgsz, auto=False, scaleFill=False)
-        lb = torch.from_numpy(lb).float().permute(2,0,1)/255.0
-
-        out.append(lb)
-
-    return torch.stack(out, dim=0)
 
 
 # -------------------------------------------#
@@ -491,88 +443,3 @@ def sens_reduce(x: Tensor, sens_maps: Tensor) -> Tensor:
             dim=1, keepdim=True
         )
     )
-
-# -------------------------------------------#
-# -------- complex to chan dim 3d ---------- #
-# -------------------------------------------#
-def complex_to_chan_dim_3d(x: Tensor) -> Tensor:
-    b, c, d, h, w, two = x.shape
-    assert two == 2
-    assert c == 1
-
-    return x.permute(0, 5, 1, 2, 3, 4).reshape(b, 2 * c, d, h, w)
-
-
-# -------------------------------------------#
-# ---- chan complex to last dim 3d --------- #
-# -------------------------------------------#
-def chan_complex_to_last_dim_3d(x: Tensor) -> Tensor:
-    b, c2, d, h, w = x.shape
-    assert c2 == 2
-
-    c = c2 // 2
-
-    return (
-        x.view(b, 2, c, d, h, w)
-        .permute(0, 2, 3, 4, 5, 1)
-        .contiguous()
-    )
-
-
-# -------------------------------------------#
-# --------------- sens expand 3d ----------- #
-# -------------------------------------------#
-def sens_expand_3d(x: Tensor, sens_maps: Tensor) -> Tensor:
-    return fft2c_new(
-        complex_mul(
-            chan_complex_to_last_dim_3d(x),
-            sens_maps,
-        )
-    )
-
-
-# -------------------------------------------#
-# --------------- sens reduce 3d ----------- #
-# -------------------------------------------#
-def sens_reduce_3d(x: Tensor, sens_maps: Tensor) -> Tensor:
-    return complex_to_chan_dim_3d(
-        complex_mul(
-            ifft2c_new(x),
-            complex_conj(sens_maps),
-        ).sum(dim=1, keepdim=True)
-    )
-
-
-# -------------------------------------------#
-# ----------------- mask center 3d --------- #
-# -------------------------------------------#
-def mask_center_3d(x: torch.Tensor, mask_from: int, mask_to: int) -> torch.Tensor:
-    mask = torch.zeros_like(x)
-    mask[:, :, :, :, mask_from:mask_to] = x[:, :, :, :, mask_from:mask_to]
-    return mask
-
-
-# -------------------------------------------#
-# ----------- batched mask center 3d ------- #
-# -------------------------------------------#
-def batched_mask_center_3d(
-    x: torch.Tensor,
-    mask_from: torch.Tensor,
-    mask_to: torch.Tensor,
-) -> torch.Tensor:
-
-    if mask_from.shape[0] == 1:
-        return mask_center_3d(x, int(mask_from.item()), int(mask_to.item()))
-
-    width = x.shape[-2]
-
-    line_idx = torch.arange(width, device=x.device)
-
-    line_mask = (
-        (line_idx[None, :] >= mask_from[:, None].to(device=x.device))
-        & (line_idx[None, :] < mask_to[:, None].to(device=x.device))
-    )
-
-    line_mask = line_mask[:, None, None, None, :, None].to(dtype=x.dtype)
-
-    return x * line_mask
