@@ -77,10 +77,7 @@ class MriModule(pl.LightningModule):
         mse_vals = defaultdict(dict)
         target_norms = defaultdict(dict)
         ssim_vals = defaultdict(dict)
-        perceptual_vals = defaultdict(dict)
 
-        pl_layer_raw_vals = defaultdict(lambda: defaultdict(dict))
-        pl_layer_weighted_vals = defaultdict(lambda: defaultdict(dict))
         max_vals = {}
 
         for i, fname in enumerate(val_logs["fname"]):
@@ -101,20 +98,6 @@ class MriModule(pl.LightningModule):
                 evaluation.ssim(target[None,...], output[None,...], maxval=maxval)
             ).view(1)
 
-            if val_logs.get("perceptual_loss") is not None:
-                perceptual_vals[fname][slice_num] = torch.tensor(
-                    val_logs["perceptual_loss"].item()
-                ).view(1)
-
-            if val_logs.get("pl_stats") is not None:
-                stats = val_logs["pl_stats"]
-
-                for l_idx, val in enumerate(stats["per_layer_raw"]):
-                    pl_layer_raw_vals[fname][l_idx][slice_num] = torch.tensor(val).view(1)
-
-                for l_idx, val in enumerate(stats["per_layer_weighted"]):
-                    pl_layer_weighted_vals[fname][l_idx][slice_num] = torch.tensor(val).view(1)
-
             max_vals[fname] = maxval
 
         return {
@@ -122,9 +105,6 @@ class MriModule(pl.LightningModule):
             "mse_vals": dict(mse_vals),
             "target_norms": dict(target_norms),
             "ssim_vals": dict(ssim_vals),
-            "perceptual_vals": dict(perceptual_vals),
-            "pl_layer_raw_vals": dict(pl_layer_raw_vals),
-            "pl_layer_weighted_vals": dict(pl_layer_weighted_vals),
             "max_vals": max_vals,
         }
 
@@ -141,9 +121,6 @@ class MriModule(pl.LightningModule):
         mse_vals = defaultdict(dict)
         target_norms = defaultdict(dict)
         ssim_vals = defaultdict(dict)
-        perceptual_vals = defaultdict(dict)
-        pl_layer_raw_vals = defaultdict(lambda: defaultdict(dict))
-        pl_layer_weighted_vals = defaultdict(lambda: defaultdict(dict))
         max_vals = {}
 
         for log in val_logs:
@@ -155,14 +132,6 @@ class MriModule(pl.LightningModule):
                 target_norms[k].update(log["target_norms"][k])
             for k in log["ssim_vals"]:
                 ssim_vals[k].update(log["ssim_vals"][k])
-            for k in log["perceptual_vals"]:
-                perceptual_vals[k].update(log["perceptual_vals"][k])
-
-            for k in log.get("pl_layer_raw_vals", {}):
-                pl_layer_raw_vals[k].update(log["pl_layer_raw_vals"][k])
-
-            for k in log.get("pl_layer_weighted_vals", {}):
-                pl_layer_weighted_vals[k].update(log["pl_layer_weighted_vals"][k])
 
             for k in log["max_vals"]:
                 max_vals[k] = log["max_vals"][k]
@@ -171,7 +140,6 @@ class MriModule(pl.LightningModule):
             "nmse":0,
             "ssim":0,
             "psnr":0,
-            "perceptual_loss":0,
         }
 
         local_examples = 0
@@ -191,11 +159,6 @@ class MriModule(pl.LightningModule):
 
             metrics["ssim"] += torch.mean(torch.cat([v.view(-1) for v in ssim_vals[fname].values()]))
 
-            if fname in perceptual_vals:
-                metrics["perceptual_loss"] += torch.mean(
-                    torch.cat([v.view(-1) for v in perceptual_vals[fname].values()])
-                )
-
         tot_examples = torch.tensor(local_examples, device=self.device)
         val_loss = torch.sum(torch.cat(losses)).to(self.device)
         tot_slice_examples = torch.tensor(len(losses), dtype=torch.float, device=self.device)
@@ -204,33 +167,6 @@ class MriModule(pl.LightningModule):
 
         for m,v in metrics.items():
             self.log(f"val/{m}", v/tot_examples, sync_dist=True)
-
-        # =====================================
-        # Per-layer perceptual metrics
-        # =====================================
-        if pl_layer_weighted_vals:
-
-            example_key = next(iter(pl_layer_weighted_vals))
-            num_layers = len(pl_layer_weighted_vals[example_key])
-
-            for layer_idx in range(num_layers):
-
-                layer_w = 0
-
-                for fname in pl_layer_weighted_vals:
-                    if layer_idx in pl_layer_weighted_vals[fname]:
-                        layer_w += torch.mean(
-                            torch.cat([
-                                v.view(-1)
-                                for v in pl_layer_weighted_vals[fname][layer_idx].values()
-                            ])
-                        )
-
-                self.log(
-                    f"val/pl_layer_{layer_idx}",
-                    layer_w / tot_examples,
-                    sync_dist=True
-                )
 
     # ============================================================
     # TEST
@@ -250,21 +186,6 @@ class MriModule(pl.LightningModule):
 
                 outputs[fname][sl] = log["output"][i]
 
-                if log.get("mask_1d") is not None:
-                    masks_1d[fname][sl] = log["mask_1d"][i]
-
-                if log.get("support_width") is not None:
-                    support_widths[fname][sl] = log["support_width"][i]
-
-                if log.get("effective_acceleration") is not None:
-                    accelerations[fname][sl] = log["effective_acceleration"][i]
-
-                if log.get("acq_start") is not None:
-                    acq_starts[fname][sl] = int(log["acq_start"][i])
-
-                if log.get("acq_end") is not None:
-                    acq_ends[fname][sl] = int(log["acq_end"][i])
-
         packed = {}
 
         for fname in outputs:
@@ -273,31 +194,6 @@ class MriModule(pl.LightningModule):
                     [out for _, out in sorted(outputs[fname].items())]
                 )
             }
-
-            if fname in masks_1d and len(masks_1d[fname]) > 0:
-                item["mask_1d"] = np.stack(
-                    [m for _, m in sorted(masks_1d[fname].items())]
-                ).astype(np.uint8)
-
-            if fname in support_widths and len(support_widths[fname]) > 0:
-                item["support_width"] = np.array(
-                    [v for _, v in sorted(support_widths[fname].items())]
-                )
-
-            if fname in accelerations and len(accelerations[fname]) > 0:
-                item["effective_acceleration"] = np.array(
-                    [v for _, v in sorted(accelerations[fname].items())]
-                )
-
-            if fname in acq_starts and len(acq_starts[fname]) > 0:
-                item["acq_start"] = np.array(
-                    [v for _, v in sorted(acq_starts[fname].items())]
-                )
-
-            if fname in acq_ends and len(acq_ends[fname]) > 0:
-                item["acq_end"] = np.array(
-                    [v for _, v in sorted(acq_ends[fname].items())]
-                )
 
             packed[fname] = item
 
