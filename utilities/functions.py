@@ -8,7 +8,6 @@ import torch.fft
 from torch import Tensor
 
 from data.undersampling_patterns import MaskFunc
-from yolov5.utils.augmentations import letterbox
 
 
 # -------------------------------------------#
