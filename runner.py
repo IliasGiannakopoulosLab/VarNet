@@ -9,16 +9,12 @@ import torch.distributed as dist
 from pytorch_lightning.loggers import TensorBoardLogger
 
 from data.data_module import DataModule
-from data.data_transforms import VarNetDataTransform, VolumeVarNetDataTransform
+from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
 from varnets.VarNet_module import FIVarNetModule
-from varnets.VarNet_module_3D import VarNetModule3D
 from varnets.VarNet import (
     E2EVarNet,
-    E2EVarNet3D,
     FIVarNet,
-    LearnableMaskedVarNet,
-    LearnableMaskedVarNet3D,
 )
 
 torch.set_float32_matmul_precision("high")
@@ -118,10 +114,6 @@ def check_gpu_availability():
     return int(output)
 
 
-def _is_volume_mode(args) -> bool:
-    return getattr(args, "dataset_format", "slice") == "volume"
-
-
 def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
     """
     Adapts checkpoint keys for wrapped learnable-mask models.
@@ -165,8 +157,6 @@ def _get_varnet_state_dict_from_checkpoint(
 
     filtered = _filter_state_dict_by_prefix(state_dict, module_name)
 
-    # 3D checkpoints are usually saved under "varnet.". The 3D module also
-    # exposes a compatibility alias "fi_varnet", so accept both prefixes.
     if len(filtered) == 0 and module_name == "fi_varnet.":
         filtered = _filter_state_dict_by_prefix(state_dict, "varnet.")
     elif len(filtered) == 0 and module_name == "varnet.":
@@ -216,55 +206,11 @@ def reload_state_dict(
 
     return module
 
-
-def _get_single_learnable_mask_params(args):
-    if len(args.accelerations) != 1:
-        raise ValueError(
-            "Learnable mask mode currently requires exactly one acceleration."
-        )
-    if len(args.center_fractions) != 1:
-        raise ValueError(
-            "Learnable mask mode currently requires exactly one center fraction."
-        )
-
-    acceleration = int(args.accelerations[0])
-    center_fraction = float(args.center_fractions[0])
-
-    return acceleration, center_fraction
-
-
 # ============================================================
 # MODEL BUILDERS
 # ============================================================
 def build_base_varnet(args, acceleration: int):
-    if _is_volume_mode(args):
-        if args.varnet_type != "e2e_varnet":
-            raise ValueError(
-                "dataset_format='volume' currently supports only varnet_type='e2e_varnet'. "
-                "FIVarNet3D is not implemented."
-            )
-
-        print(f"BUILDING 3D E2E VARNET, chans={args.chans}")
-
-        if args.freeze_sens_net and args.sens_ckpt is None:
-            raise ValueError(
-                "--freeze_sens_net requires --sens_ckpt. "
-                "Do not freeze a randomly initialized sensitivity model."
-            )
-
-        return E2EVarNet3D(
-            num_cascades=args.num_cascades,
-            pools=args.pools,
-            chans=args.chans,
-            sens_pools=args.sens_pools,
-            sens_chans=args.sens_chans,
-            kernel_size=tuple(args.kernel_size),
-            pool_kernel_size=tuple(args.pool_kernel_size),
-            sens_ckpt=None if args.sens_ckpt is None else str(args.sens_ckpt),
-            freeze_sens_net=args.freeze_sens_net,
-            strict_sens_load=not args.non_strict_sens_load,
-        )
-
+    
     if args.varnet_type == "fi_varnet":
         print(f"BUILDING FI VARNET, chans={args.chans}")
         return FIVarNet(
@@ -290,37 +236,6 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_model(args):
-    if args.mask_mode == "learnable":
-        acceleration, center_fraction = _get_single_learnable_mask_params(args)
-        base_varnet = build_base_varnet(args, acceleration=acceleration)
-
-        if _is_volume_mode(args):
-            print(
-                f"WRAPPING 3D E2E VARNET WITH LEARNABLE 2D CARTESIAN MASK, "
-                f"acceleration={acceleration}, center_fraction={center_fraction}, "
-                f"num_slice_logits={args.num_slice_logits}, "
-                f"num_phase_logits={args.num_logits}"
-            )
-
-            return LearnableMaskedVarNet3D(
-                base_varnet=base_varnet,
-                acceleration=acceleration,
-                center_fraction=center_fraction,
-                num_phase_logits=args.num_logits,
-                num_slice_logits=args.num_slice_logits,
-            )
-
-        print(
-            f"WRAPPING WITH LEARNABLE CARTESIAN MASK, "
-            f"acceleration={acceleration}, center_fraction={center_fraction}"
-        )
-
-        return LearnableMaskedVarNet(
-            base_varnet=base_varnet,
-            acceleration=acceleration,
-            center_fraction=center_fraction,
-            num_logits=args.num_logits,
-        )
 
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
@@ -328,25 +243,6 @@ def fetch_model(args):
 
 def fetch_lightning_module(args):
     model = fetch_model(args)
-
-    if _is_volume_mode(args):
-        return VarNetModule3D(
-            varnet=model,
-            learnable_mask=(args.mask_mode == "learnable"),
-            lr=args.lr,
-            lr_base=args.lr_base,
-            lr_mask=args.lr_mask,
-            lr_step_size=args.lr_step_size,
-            lr_gamma=args.lr_gamma,
-            model_name=args.model_name,
-            weight_decay=args.weight_decay,
-            max_steps=args.max_steps,
-            ramp_steps=args.ramp_steps,
-            cosine_decay_start=args.cosine_decay_start,
-            drop_prob=args.drop_prob,
-            log_slice=args.log_slice,
-            num_log_images=args.num_log_images,
-        )
 
     return FIVarNetModule(
         fi_varnet=model,
@@ -371,12 +267,11 @@ def fetch_lightning_module(args):
         layer_weights=args.layer_weights,
     )
 
-
 # ============================================================
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
-    transform_cls = VolumeVarNetDataTransform if _is_volume_mode(args) else VarNetDataTransform
+    transform_cls = VarNetDataTransform
 
     if args.mask_mode == "learnable":
         train_transform = transform_cls(
@@ -441,9 +336,6 @@ def cli_main(args):
         sample_rate=args.sample_rate,
         val_sample_rate=args.val_sample_rate,
         test_sample_rate=args.test_sample_rate,
-        volume_sample_rate=args.volume_sample_rate,
-        val_volume_sample_rate=args.val_volume_sample_rate,
-        test_volume_sample_rate=args.test_volume_sample_rate,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         distributed_sampler=(args.accelerator in ("ddp", "ddp_cpu")),
@@ -508,25 +400,20 @@ def build_args(cluster_launch: bool = True):
 
     parser.add_argument(
         "--mask_mode",
-        choices=("fixed", "learnable"),
+        choices=("fixed"),
         default="fixed",
         type=str,
     )
 
     parser.add_argument(
         "--mask_type",
-        choices=("equispaced_fraction", "equispaced", "edge_dominant"),
+        choices=("equispaced_fraction", "equispaced"),
         default="equispaced_fraction",
         type=str,
     )
 
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
-    # For 1D learnable masks, --num_logits is the canonical ky resolution.
-    # For 2D multislice learnable masks, --num_logits is the phase-axis
-    # resolution and --num_slice_logits is the slice-axis resolution.
-    parser.add_argument("--num_logits", type=int, default=320)
-    parser.add_argument("--num_slice_logits", type=int, default=40)
 
     # GPU memory debug printing. Set to 0 to disable.
     parser.add_argument("--gpu_mem_log_every", type=int, default=0)
@@ -538,18 +425,6 @@ def build_args(cluster_launch: bool = True):
         default="fi_varnet",
     )
 
-    # 2D-only YOLO/perceptual options. These are ignored in volume mode.
-    parser.add_argument("--yolo_repo", type=str, default="path/to/yolo/")
-    parser.add_argument("--yolo_cfg", type=str, default="path/to/yolo.yaml")
-    parser.add_argument("--yolo_weights", type=str, default="path/to/weights.pt")
-    parser.add_argument("--yolo_flag", type=int, default=1)
-    parser.add_argument("--device", type=str, default="0")
-    parser.add_argument("--imgsz", nargs=2, type=int, default=[640, 640])
-    parser.add_argument("--half", action="store_true")
-    parser.add_argument("--pl_weight", type=float, default=1.0)
-    parser.add_argument("--feature_layers", nargs="+", default=None)
-    parser.add_argument("--layer_weights", nargs="+", type=float, default=None)
-
     parser = DataModule.add_data_specific_args(parser)
 
     # First pass: decide which model module owns the architecture args and log root.
@@ -557,10 +432,7 @@ def build_args(cluster_launch: bool = True):
     if args.log_path is None:
         raise ValueError("--log_path must be provided.")
 
-    if args.dataset_format == "volume":
-        default_root_dir = args.log_path / "e2e_varnet_3d"
-        module_arg_adder = VarNetModule3D.add_model_specific_args
-    elif args.varnet_type == "e2e_varnet":
+    if args.varnet_type == "e2e_varnet":
         default_root_dir = args.log_path / "e2e_varnet"
         module_arg_adder = FIVarNetModule.add_model_specific_args
     elif args.varnet_type == "fi_varnet":
@@ -574,34 +446,11 @@ def build_args(cluster_launch: bool = True):
         batch_size=1,
         test_path=None,
         combine_train_val=True,
-        varnet_type="e2e_varnet" if args.dataset_format == "volume" else args.varnet_type,
+        varnet_type=args.varnet_type,
     )
 
     parser = module_arg_adder(parser)
 
-    # ------------------------------------------------------------ #
-    # -------- optional frozen 2D sensitivity for 3D VarNet --------#
-    # ------------------------------------------------------------ #
-    parser.add_argument(
-        "--sens_ckpt",
-        type=Path,
-        default=None,
-        help="Optional 2D VarNet checkpoint used to initialize the 3D slice-wise sensitivity model.",
-    )
-
-    parser.add_argument(
-        "--freeze_sens_net",
-        action="store_true",
-        help="Freeze the 3D slice-wise sensitivity model and run it without gradients.",
-    )
-
-    parser.add_argument(
-        "--non_strict_sens_load",
-        action="store_true",
-        help="Load sensitivity weights with strict=False.",
-    )
-
-    # Shared reconstruction defaults. 3D module ignores lr_base/lr_mask/YOLO fields.
     parser.set_defaults(
         num_cascades=12,
         pools=4,
@@ -609,8 +458,6 @@ def build_args(cluster_launch: bool = True):
         sens_pools=4,
         sens_chans=8,
         lr=0.0003,
-        lr_base=None,
-        lr_mask=None,
         ramp_steps=7500,
         cosine_decay_start=150000,
         weight_decay=0.0,
