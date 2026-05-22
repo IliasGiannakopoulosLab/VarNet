@@ -29,15 +29,14 @@ class VarNetDataTransform:
         self,
         mask_func: Optional[MaskFunc] = None,
         use_seed: bool = True,
-        learnable_mask: bool = False,
     ):
         self.mask_func = mask_func
         self.use_seed = use_seed
-    
+
     def __call__(
         self,
         kspace: np.ndarray,
-        mask: np.ndarray,
+        mask: Optional[np.ndarray],
         target: Optional[np.ndarray],
         attrs: Dict,
         fname: str,
@@ -55,6 +54,8 @@ class VarNetDataTransform:
         seed = None if not self.use_seed else tuple(map(ord, fname))
 
         crop_size = (attrs["recon_size"][0], attrs["recon_size"][1])
+        acq_start = attrs["padding_left"]
+        acq_end = attrs["padding_right"]
 
         if self.mask_func is not None:
             masked_kspace, mask_torch, num_low_frequencies = apply_mask(
@@ -63,24 +64,6 @@ class VarNetDataTransform:
                 seed=seed,
                 padding=(acq_start, acq_end),
             )
-
-            sample = VarNetSample(
-                full_kspace=full_kspace,
-                masked_kspace=masked_kspace,
-                mask=mask_torch.to(torch.bool),
-                num_low_frequencies=num_low_frequencies,
-                target=target_torch,
-                fname=fname,
-                slice_num=slice_num,
-                max_value=max_value,
-                crop_size=crop_size,
-                acq_start=acq_start,
-                acq_end=acq_end,
-            )
-
-        # ------------------------------------------------ #
-        # no mask_func path (e.g. test with stored mask)   #
-        # ------------------------------------------------ #
         else:
             masked_kspace = full_kspace
             shape = np.array(full_kspace.shape)
@@ -92,22 +75,18 @@ class VarNetDataTransform:
 
             mask_torch = torch.from_numpy(mask.reshape(*mask_shape).astype(np.float32))
             mask_torch = mask_torch.reshape(*mask_shape)
-
             mask_torch[:, :, :acq_start] = 0
             mask_torch[:, :, acq_end:] = 0
+            num_low_frequencies = 0
 
-            sample = VarNetSample(
-                full_kspace=full_kspace,
-                masked_kspace=masked_kspace,
-                mask=mask_torch.to(torch.bool),
-                num_low_frequencies=0,
-                target=target_torch,
-                fname=fname,
-                slice_num=slice_num,
-                max_value=max_value,
-                crop_size=crop_size,
-                acq_start=acq_start,
-                acq_end=acq_end,
-            )
-
-        return sample
+        return VarNetSample(
+            full_kspace=full_kspace,
+            masked_kspace=masked_kspace,
+            mask=mask_torch.to(torch.bool),
+            num_low_frequencies=num_low_frequencies,
+            target=target_torch,
+            fname=fname,
+            slice_num=slice_num,
+            max_value=max_value,
+            crop_size=crop_size,
+        )
