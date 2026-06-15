@@ -4,9 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from data.learnable_mask import LearnableCartesianMask
 torch.set_float32_matmul_precision("high")
+from data.learnable_mask import LearnableCartesianMask
 from utilities.functions import ifft2c_new as ifft2c
 from utilities.functions import (
     batched_mask_center,
@@ -787,7 +786,15 @@ class E2EVarNet(nn.Module):
 # -------- learnable masked varnet --------- #
 # -------------------------------------------#
 class LearnableMaskedVarNet(nn.Module):
-    """Apply a learnable 1D Cartesian mask before an E2E or FI VarNet."""
+    """
+    Wrapper around an existing VarNet (E2EVarNet or FIVarNet).
+
+    It:
+      1) receives full k-space
+      2) builds a learnable hard Cartesian line mask
+      3) applies the mask
+      4) forwards masked_kspace + mask into the base VarNet unchanged
+    """
 
     def __init__(
         self,
@@ -799,13 +806,19 @@ class LearnableMaskedVarNet(nn.Module):
         super().__init__()
 
         self.base_varnet = base_varnet
+
         self.learnable_mask = LearnableCartesianMask(
             acceleration=acceleration,
             center_fraction=center_fraction,
             num_logits=num_logits,
         )
+
+        # useful for debugging / logging later
         self.latest_mask_info = None
 
+    # -------------------------------------------#
+    # ---------------- forward ----------------- #
+    # -------------------------------------------#
     def forward(
         self,
         full_kspace: torch.Tensor,
@@ -814,6 +827,18 @@ class LearnableMaskedVarNet(nn.Module):
         crop_size: Optional[Tuple[int, int]] = None,
         return_mask_extras: bool = False,
     ):
+        """
+        Args:
+            full_kspace: [B, coils, H, W, 2]
+            acq_start: int or tensor [B]
+            acq_end: int or tensor [B]
+            crop_size: optional crop passed through to base VarNet
+            return_mask_extras: if True, also returns mask debug info
+
+        Returns:
+            output or (output, mask_info)
+        """
+
         masked_kspace, mask, num_low_frequencies, extras = self.learnable_mask(
             full_kspace=full_kspace,
             acq_start=acq_start,
@@ -839,7 +864,6 @@ class LearnableMaskedVarNet(nn.Module):
             return output, mask_info
 
         return output
-
 
 # -------------------------------------------#
 # ----------- uncertainty network ---------- #
