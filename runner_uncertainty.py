@@ -34,23 +34,29 @@ def check_gpu_availability() -> int:
 
 
 def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
-    """Adapt plain-VarNet and learnable-wrapper checkpoints in either direction."""
+    """
+    Adapts checkpoint keys for wrapped learnable-mask models.
+
+    Cases handled:
+      source checkpoint = plain VarNet
+      target model      = LearnableMaskedVarNet(...)
+
+    Then we remap:
+      conv.weight -> base_varnet.conv.weight
+
+    If the source checkpoint is already a learnable-mask wrapper, the keys are
+    left unchanged after the Lightning-module prefix is removed.
+    """
     target_keys = set(model.state_dict().keys())
-    target_is_wrapper = any(key.startswith("base_varnet.") for key in target_keys)
+
+    target_is_wrapper = any(k.startswith("base_varnet.") for k in target_keys)
     source_is_wrapper = any(
-        key.startswith("base_varnet.") or key.startswith("learnable_mask.")
-        for key in state_dict
+        k.startswith("base_varnet.") or k.startswith("learnable_mask.")
+        for k in state_dict.keys()
     )
 
     if target_is_wrapper and not source_is_wrapper:
-        return {f"base_varnet.{key}": value for key, value in state_dict.items()}
-
-    if source_is_wrapper and not target_is_wrapper:
-        return {
-            key[len("base_varnet."):]: value
-            for key, value in state_dict.items()
-            if key.startswith("base_varnet.")
-        }
+        state_dict = {f"base_varnet.{k}": v for k, v in state_dict.items()}
 
     return state_dict
 
@@ -84,6 +90,9 @@ def _get_varnet_state_dict_from_checkpoint(
         if len(filtered) > 0:
             return filtered
 
+    if any(k.startswith("base_varnet.") for k in state_dict.keys()):
+        return state_dict
+
     raise RuntimeError(
         f"No VarNet weights found in {weight_path}. "
         f"Tried prefixes: {prefixes_to_try}."
@@ -106,29 +115,23 @@ def load_varnet_weights_only(
     print("  missing keys   :", len(missing))
     print("  unexpected keys:", len(unexpected))
 
-    missing_mask_keys = [
-        key for key in missing if key.startswith("learnable_mask.")
-    ]
-    if missing_mask_keys:
-        raise RuntimeError(
-            "The selected VarNet checkpoint does not contain trained learnable-mask "
-            f"parameters. Missing keys: {missing_mask_keys}"
-        )
-
     return model
 
 
 def _get_single_learnable_mask_params(args):
     if len(args.accelerations) != 1:
         raise ValueError(
-            "Learnable mask mode requires exactly one acceleration."
+            "Learnable mask mode currently requires exactly one acceleration."
         )
     if len(args.center_fractions) != 1:
         raise ValueError(
-            "Learnable mask mode requires exactly one center fraction."
+            "Learnable mask mode currently requires exactly one center fraction."
         )
 
-    return int(args.accelerations[0]), float(args.center_fractions[0])
+    acceleration = int(args.accelerations[0])
+    center_fraction = float(args.center_fractions[0])
+
+    return acceleration, center_fraction
 
 
 # ============================================================
@@ -163,6 +166,12 @@ def fetch_varnet_model(args):
     if args.mask_mode == "learnable":
         acceleration, center_fraction = _get_single_learnable_mask_params(args)
         base_varnet = build_base_varnet(args, acceleration=acceleration)
+
+        print(
+            f"WRAPPING WITH LEARNABLE CARTESIAN MASK, "
+            f"acceleration={acceleration}, center_fraction={center_fraction}"
+        )
+
         return LearnableMaskedVarNet(
             base_varnet=base_varnet,
             acceleration=acceleration,
@@ -187,7 +196,6 @@ def fetch_uncertainty_model(args):
 # ============================================================
 def build_transforms(args):
     if args.mask_mode == "learnable":
-        _get_single_learnable_mask_params(args)
         train_transform = VarNetDataTransform(
             mask_func=None,
             use_seed=False,
@@ -427,12 +435,7 @@ def build_args(cluster_launch: bool = True):
 
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
-    parser.add_argument(
-        "--num_logits",
-        type=int,
-        default=320,
-        help="Canonical phase-encoding width of the learnable 1D mask.",
-    )
+    parser.add_argument("--num_logits", type=int, default=320)
 
     parser.add_argument(
         "--varnet_type",
