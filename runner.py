@@ -12,7 +12,7 @@ from data.data_module import DataModule
 from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
 from varnets.VarNet_module import FIVarNetModule
-from varnets.VarNet import E2EVarNet, FIVarNet
+from varnets.VarNet import E2EVarNet, FIVarNet, LearnableMaskedVarNet
 
 
 torch.set_float32_matmul_precision("high")
@@ -113,6 +113,28 @@ def check_gpu_availability():
     return int(output)
 
 
+def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
+    """Adapt plain-VarNet and learnable-wrapper checkpoints in either direction."""
+    target_keys = set(model.state_dict().keys())
+    target_is_wrapper = any(key.startswith("base_varnet.") for key in target_keys)
+    source_is_wrapper = any(
+        key.startswith("base_varnet.") or key.startswith("learnable_mask.")
+        for key in state_dict
+    )
+
+    if target_is_wrapper and not source_is_wrapper:
+        return {f"base_varnet.{key}": value for key, value in state_dict.items()}
+
+    if source_is_wrapper and not target_is_wrapper:
+        return {
+            key[len("base_varnet."):]: value
+            for key, value in state_dict.items()
+            if key.startswith("base_varnet.")
+        }
+
+    return state_dict
+
+
 def _filter_state_dict_by_prefix(state_dict: dict, module_name: str) -> dict:
     lm = len(module_name)
     return {
@@ -154,6 +176,7 @@ def load_weights_only(
         weight_path=weight_path,
         module_name=module_name,
     )
+    filtered = _adapt_state_dict_for_model(module.fi_varnet, filtered)
 
     missing, unexpected = module.fi_varnet.load_state_dict(filtered, strict=False)
     print("load_weights_only:")
@@ -174,9 +197,23 @@ def reload_state_dict(
         weight_path=fname,
         module_name=module_name,
     )
+    state_dict = _adapt_state_dict_for_model(module.fi_varnet, state_dict)
     module.fi_varnet.load_state_dict(state_dict, strict=False)
 
     return module
+
+
+def _get_single_learnable_mask_params(args):
+    if len(args.accelerations) != 1:
+        raise ValueError(
+            "Learnable mask mode requires exactly one acceleration."
+        )
+    if len(args.center_fractions) != 1:
+        raise ValueError(
+            "Learnable mask mode requires exactly one center fraction."
+        )
+
+    return int(args.accelerations[0]), float(args.center_fractions[0])
 
 
 # ============================================================
@@ -208,6 +245,23 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_model(args):
+    if args.mask_mode == "learnable":
+        acceleration, center_fraction = _get_single_learnable_mask_params(args)
+        base_varnet = build_base_varnet(args, acceleration=acceleration)
+
+        print(
+            "WRAPPING VARNET WITH LEARNABLE 1D CARTESIAN MASK, "
+            f"acceleration={acceleration}, "
+            f"center_fraction={center_fraction}, "
+            f"num_logits={args.num_logits}"
+        )
+        return LearnableMaskedVarNet(
+            base_varnet=base_varnet,
+            acceleration=acceleration,
+            center_fraction=center_fraction,
+            num_logits=args.num_logits,
+        )
+
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
 
@@ -217,7 +271,10 @@ def fetch_lightning_module(args):
 
     return FIVarNetModule(
         fi_varnet=model,
+        learnable_mask=(args.mask_mode == "learnable"),
         lr=args.lr,
+        lr_base=args.lr_base,
+        lr_mask=args.lr_mask,
         model_name=args.model_name,
         weight_decay=args.weight_decay,
         max_steps=args.max_steps,
@@ -230,6 +287,25 @@ def fetch_lightning_module(args):
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
+    if args.mask_mode == "learnable":
+        _get_single_learnable_mask_params(args)
+        train_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=False,
+            learnable_mask=True,
+        )
+        val_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=True,
+            learnable_mask=True,
+        )
+        test_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=True,
+            learnable_mask=True,
+        )
+        return train_transform, val_transform, test_transform
+
     mask = create_mask_for_mask_type(
         args.mask_type,
         args.center_fractions,
@@ -333,6 +409,13 @@ def build_args(cluster_launch: bool = True):
     )
 
     parser.add_argument(
+        "--mask_mode",
+        choices=("fixed", "learnable"),
+        default="fixed",
+        type=str,
+    )
+
+    parser.add_argument(
         "--mask_type",
         choices=("equispaced_fraction", "equispaced"),
         default="equispaced_fraction",
@@ -341,6 +424,12 @@ def build_args(cluster_launch: bool = True):
 
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
+    parser.add_argument(
+        "--num_logits",
+        type=int,
+        default=320,
+        help="Canonical phase-encoding width of the learnable 1D mask.",
+    )
 
     parser.add_argument("--gpu_mem_log_every", type=int, default=0)
     parser.add_argument("--gpu_mem_log_all_ranks", action="store_true")
@@ -383,6 +472,8 @@ def build_args(cluster_launch: bool = True):
         sens_pools=4,
         sens_chans=8,
         lr=0.0003,
+        lr_base=None,
+        lr_mask=None,
         ramp_steps=7500,
         cosine_decay_start=150000,
         weight_decay=0.0,
