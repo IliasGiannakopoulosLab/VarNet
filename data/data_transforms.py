@@ -1,5 +1,4 @@
 from typing import Dict, NamedTuple, Optional, Tuple
-
 import numpy as np
 import torch
 
@@ -7,6 +6,9 @@ from data.undersampling_patterns import MaskFunc
 from utilities.functions import apply_mask, to_tensor
 
 
+# -------------------------------------------#
+# --------------- varnet sample ------------ #
+# -------------------------------------------#
 class VarNetSample(NamedTuple):
     full_kspace: torch.Tensor
     masked_kspace: torch.Tensor
@@ -21,45 +23,52 @@ class VarNetSample(NamedTuple):
     acq_end: int
 
 
+# -------------------------------------------#
+# ----------- varnet data transform -------- #
+# -------------------------------------------#
 class VarNetDataTransform:
-    """Transform a fastMRI slice for fixed- or learnable-mask VarNet training."""
-
     def __init__(
         self,
         mask_func: Optional[MaskFunc] = None,
         use_seed: bool = True,
         learnable_mask: bool = False,
     ):
-        if learnable_mask and mask_func is not None:
-            raise ValueError("learnable_mask=True requires mask_func=None")
-
         self.mask_func = mask_func
         self.use_seed = use_seed
         self.learnable_mask = learnable_mask
 
-    @staticmethod
-    def _build_acquisition_support_mask(
-        full_kspace: torch.Tensor,
+    # -------------------------------------------#
+    # -------- full-acquisition mask helper ---- #
+    # -------------------------------------------#
+    def _build_full_acq_mask(
+        self,
+        kspace_torch: torch.Tensor,
         acq_start: int,
         acq_end: int,
     ) -> torch.Tensor:
-        num_cols = full_kspace.shape[-2]
-        mask_shape = [1] * full_kspace.ndim
+        shape = np.array(kspace_torch.shape)
+        num_cols = shape[-2]
+
+        shape[:-3] = 1
+        mask_shape = [1] * len(shape)
         mask_shape[-2] = num_cols
 
-        support_mask = torch.zeros(*mask_shape, dtype=torch.float32)
-        support_mask[..., acq_start:acq_end, :] = 1.0
-        return support_mask
+        mask_torch = torch.ones(*mask_shape, dtype=torch.float32)
+        mask_torch[:, :, :acq_start] = 0
+        mask_torch[:, :, acq_end:] = 0
+
+        return mask_torch
 
     def __call__(
         self,
         kspace: np.ndarray,
-        mask: Optional[np.ndarray],
+        mask: np.ndarray,
         target: Optional[np.ndarray],
         attrs: Dict,
         fname: str,
         slice_num: int,
     ) -> VarNetSample:
+
         if target is not None:
             target_torch = to_tensor(target)
             max_value = attrs["max"]
@@ -70,19 +79,37 @@ class VarNetDataTransform:
         full_kspace = to_tensor(kspace)
         seed = None if not self.use_seed else tuple(map(ord, fname))
 
+        acq_start = attrs["padding_left"]
+        acq_end = attrs["padding_right"]
         crop_size = (attrs["recon_size"][0], attrs["recon_size"][1])
-        acq_start = int(attrs["padding_left"])
-        acq_end = int(attrs["padding_right"])
 
+        # ------------------------------------------------ #
+        # learnable-mask mode: we do NOT undersample here  #
+        # ------------------------------------------------ #
         if self.learnable_mask:
-            mask_torch = self._build_acquisition_support_mask(
+            full_acq_mask = self._build_full_acq_mask(
                 full_kspace,
                 acq_start,
                 acq_end,
             )
-            masked_kspace = full_kspace
-            num_low_frequencies = 0
 
+            sample = VarNetSample(
+                full_kspace=full_kspace,
+                masked_kspace=full_kspace,  # placeholder for compatibility
+                mask=full_acq_mask.to(torch.bool),  # acquisition support only
+                num_low_frequencies=0,
+                target=target_torch,
+                fname=fname,
+                slice_num=slice_num,
+                max_value=max_value,
+                crop_size=crop_size,
+                acq_start=acq_start,
+                acq_end=acq_end,
+            )
+
+        # ------------------------------------------------ #
+        # fixed-mask training/validation path (current)   #
+        # ------------------------------------------------ #
         elif self.mask_func is not None:
             masked_kspace, mask_torch, num_low_frequencies = apply_mask(
                 full_kspace,
@@ -91,35 +118,50 @@ class VarNetDataTransform:
                 padding=(acq_start, acq_end),
             )
 
-        else:
-            if mask is None:
-                raise ValueError(
-                    "No stored mask was found. Provide mask_func for synthetic fixed "
-                    "undersampling or use learnable_mask=True."
-                )
+            sample = VarNetSample(
+                full_kspace=full_kspace,
+                masked_kspace=masked_kspace,
+                mask=mask_torch.to(torch.bool),
+                num_low_frequencies=num_low_frequencies,
+                target=target_torch,
+                fname=fname,
+                slice_num=slice_num,
+                max_value=max_value,
+                crop_size=crop_size,
+                acq_start=acq_start,
+                acq_end=acq_end,
+            )
 
+        # ------------------------------------------------ #
+        # no mask_func path (e.g. test with stored mask)   #
+        # ------------------------------------------------ #
+        else:
             masked_kspace = full_kspace
-            num_cols = full_kspace.shape[-2]
-            mask_shape = [1] * full_kspace.ndim
+            shape = np.array(full_kspace.shape)
+            num_cols = shape[-2]
+
+            shape[:-3] = 1
+            mask_shape = [1] * len(shape)
             mask_shape[-2] = num_cols
 
-            mask_torch = torch.from_numpy(
-                mask.reshape(*mask_shape).astype(np.float32)
-            )
-            mask_torch[..., :acq_start, :] = 0
-            mask_torch[..., acq_end:, :] = 0
-            num_low_frequencies = 0
+            mask_torch = torch.from_numpy(mask.reshape(*mask_shape).astype(np.float32))
+            mask_torch = mask_torch.reshape(*mask_shape)
 
-        return VarNetSample(
-            full_kspace=full_kspace,
-            masked_kspace=masked_kspace,
-            mask=mask_torch.to(torch.bool),
-            num_low_frequencies=num_low_frequencies,
-            target=target_torch,
-            fname=fname,
-            slice_num=slice_num,
-            max_value=max_value,
-            crop_size=crop_size,
-            acq_start=acq_start,
-            acq_end=acq_end,
-        )
+            mask_torch[:, :, :acq_start] = 0
+            mask_torch[:, :, acq_end:] = 0
+
+            sample = VarNetSample(
+                full_kspace=full_kspace,
+                masked_kspace=masked_kspace,
+                mask=mask_torch.to(torch.bool),
+                num_low_frequencies=0,
+                target=target_torch,
+                fname=fname,
+                slice_num=slice_num,
+                max_value=max_value,
+                crop_size=crop_size,
+                acq_start=acq_start,
+                acq_end=acq_end,
+            )
+
+        return sample
