@@ -8,9 +8,6 @@ The codebase is intentionally focused on the stable reconstruction and uncertain
 - Feature-image VarNet (`fi_varnet`)
 - Fixed Cartesian undersampling masks
 - Pixelwise uncertainty estimation using quantile regression and conformal calibration
-
-The repository does **not** include the experimental 3D/multi-slice pipeline, learnable sampling masks, or YOLO/perceptual-loss training path.
-
 ---
 
 ## Repository structure
