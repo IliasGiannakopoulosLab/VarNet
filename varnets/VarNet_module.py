@@ -1,7 +1,6 @@
 from argparse import ArgumentParser
 from typing import Optional
 import math
-
 import torch
 
 from .Network_module import MriModule
@@ -14,8 +13,6 @@ torch.set_float32_matmul_precision("high")
 
 
 class FIVarNetModule(MriModule):
-    """Shared Lightning module for E2E VarNet and FI VarNet."""
-
     def __init__(
         self,
         fi_varnet: FIVarNet,
@@ -49,14 +46,11 @@ class FIVarNetModule(MriModule):
         self.drop_prob = drop_prob
 
         self.fi_varnet = fi_varnet
-        self.learnable_mask = learnable_mask
         self.ssim_loss = SSIMLoss()
+        self.learnable_mask = learnable_mask
 
     def forward(self, batch, return_mask_extras: bool = False):
-        return self._run_reconstruction_model(
-            batch,
-            return_mask_extras=return_mask_extras,
-        )
+        return self._run_reconstruction_model(batch, return_mask_extras=return_mask_extras)
 
     def _run_reconstruction_model(self, batch, return_mask_extras: bool = False):
         if self.learnable_mask:
@@ -78,37 +72,32 @@ class FIVarNetModule(MriModule):
     def _get_latest_mask_info(self):
         if not self.learnable_mask:
             return None
-        return getattr(self.fi_varnet, "latest_mask_info", None)
+        if not hasattr(self.fi_varnet, "latest_mask_info"):
+            return None
+        return self.fi_varnet.latest_mask_info
 
     def _log_learnable_mask_stats(self, stage: str):
         info = self._get_latest_mask_info()
         if info is None:
             return
 
-        scalar_keys = {
-            "sampled_lines": "sampled_lines",
-            "support_width": "support_width",
-            "effective_acceleration": "acceleration",
-            "outer_prob_raw_mean": "mask_prob_raw_mean",
-            "outer_prob_mean": "mask_prob_mean",
-            "target_outer_mean": "target_outer_mean",
-            "target_total_ratio": "target_total_ratio",
-        }
-
-        for source_key, log_key in scalar_keys.items():
-            if source_key in info:
-                self.log(
-                    f"{stage}/{log_key}",
-                    info[source_key].mean().detach(),
-                    sync_dist=True,
-                )
-
+        if "sampled_lines" in info:
+            self.log(f"{stage}/sampled_lines", info["sampled_lines"].mean().detach(), sync_dist=True)
+        if "support_width" in info:
+            self.log(f"{stage}/support_width", info["support_width"].mean().detach(), sync_dist=True)
+        if "effective_acceleration" in info:
+            self.log(f"{stage}/acceleration", info["effective_acceleration"].mean().detach(), sync_dist=True)
+        if "outer_prob_raw_mean" in info:
+            self.log(f"{stage}/mask_prob_raw_mean", info["outer_prob_raw_mean"].mean().detach(), sync_dist=True)
+        if "outer_prob_mean" in info:
+            self.log(f"{stage}/mask_prob_mean", info["outer_prob_mean"].mean().detach(), sync_dist=True)
         if "prob_mask_1d" in info:
-            self.log(
-                f"{stage}/mask_prob_std",
-                info["prob_mask_1d"].std().detach(),
-                sync_dist=True,
-            )
+            prob_mask_1d = info["prob_mask_1d"]
+            self.log(f"{stage}/mask_prob_std", prob_mask_1d.std().detach(), sync_dist=True)
+        if "target_outer_mean" in info:
+            self.log(f"{stage}/target_outer_mean", info["target_outer_mean"].mean().detach(), sync_dist=True)
+        if "target_total_ratio" in info:
+            self.log(f"{stage}/target_total_ratio", info["target_total_ratio"].mean().detach(), sync_dist=True)
 
     def _compute_reconstruction_loss(self, batch, output):
         target, output = center_crop_to_smallest(batch.target, output)
@@ -119,14 +108,16 @@ class FIVarNetModule(MriModule):
             data_range=batch.max_value,
         )
 
-        return target, output, ssim_loss
+        reconstruction_loss = ssim_loss
+
+        return target, output, reconstruction_loss, ssim_loss
 
     def training_step(self, batch, batch_idx):
-        output = self._run_reconstruction_model(batch)
-        _, _, loss = self._compute_reconstruction_loss(batch, output)
+        output = self._run_reconstruction_model(batch, return_mask_extras=False)
+        target, output, loss, ssim_loss = self._compute_reconstruction_loss(batch, output)
 
+        self.log("train/ssim", ssim_loss.detach(), sync_dist=True)
         self._log_learnable_mask_stats("train")
-        self.log("train/ssim", loss.detach(), sync_dist=True)
         self.log("train/loss", loss.detach(), sync_dist=True)
         return loss
 
@@ -134,18 +125,12 @@ class FIVarNetModule(MriModule):
         mask_1d = None
 
         if self.learnable_mask:
-            output, mask_info = self._run_reconstruction_model(
-                batch,
-                return_mask_extras=True,
-            )
-            mask_1d = mask_info.get("hard_mask_1d")
+            output, mask_info = self._run_reconstruction_model(batch, return_mask_extras=True)
+            mask_1d = mask_info.get("hard_mask_1d", None)
         else:
-            output = self._run_reconstruction_model(batch)
+            output = self._run_reconstruction_model(batch, return_mask_extras=False)
 
-        target, output, reconstruction_loss = self._compute_reconstruction_loss(
-            batch,
-            output,
-        )
+        target, output, reconstruction_loss, ssim_loss = self._compute_reconstruction_loss(batch, output)
 
         self._log_learnable_mask_stats("val")
 
@@ -158,25 +143,35 @@ class FIVarNetModule(MriModule):
             "target": target,
             "val_loss": reconstruction_loss,
             "reconstruction_loss": reconstruction_loss.detach(),
-            "ssim_loss": reconstruction_loss,
+            "ssim_loss": ssim_loss,
             "mask_1d": mask_1d,
         }
 
     def test_step(self, batch, batch_idx):
+        mask_1d = None
+        support_width = None
+        effective_acceleration = None
+
         if self.learnable_mask:
             output, mask_info = self._run_reconstruction_model(
-                batch,
-                return_mask_extras=True,
+                batch, return_mask_extras=True
             )
-            mask_1d = mask_info.get("hard_mask_1d")
-            support_width = mask_info.get("support_width")
-            effective_acceleration = mask_info.get("effective_acceleration")
+            mask_1d = mask_info.get("hard_mask_1d", None)
+            support_width = mask_info.get("support_width", None)
+            effective_acceleration = mask_info.get("effective_acceleration", None)
         else:
-            output = self._run_reconstruction_model(batch)
-            mask_1d = batch.mask[:, 0, 0, :, 0].to(torch.uint8)
+            output = self._run_reconstruction_model(batch, return_mask_extras=False)
+
+            fixed_mask = batch.mask
+            if fixed_mask is not None:
+                # batch.mask shape: [B, 1, 1, W, 1]
+                mask_1d = fixed_mask[:, 0, 0, :, 0].to(torch.uint8)
+
             support_width = (batch.acq_end - batch.acq_start).to(torch.float32)
-            sampled_lines = mask_1d.sum(dim=1).to(torch.float32)
-            effective_acceleration = support_width / sampled_lines.clamp_min(1.0)
+
+            if mask_1d is not None:
+                sampled_lines = mask_1d.sum(dim=1).to(torch.float32)
+                effective_acceleration = support_width / sampled_lines.clamp_min(1.0)
 
         crop_size = (
             (output.shape[-1], output.shape[-1])
@@ -192,14 +187,8 @@ class FIVarNetModule(MriModule):
             "slice": batch.slice_num,
             "output": output.cpu().numpy(),
             "mask_1d": None if mask_1d is None else mask_1d.cpu().numpy(),
-            "support_width": (
-                None if support_width is None else support_width.cpu().numpy()
-            ),
-            "effective_acceleration": (
-                None
-                if effective_acceleration is None
-                else effective_acceleration.cpu().numpy()
-            ),
+            "support_width": None if support_width is None else support_width.cpu().numpy(),
+            "effective_acceleration": None if effective_acceleration is None else effective_acceleration.cpu().numpy(),
             "acq_start": batch.acq_start.cpu().numpy(),
             "acq_end": batch.acq_end.cpu().numpy(),
         }
@@ -213,6 +202,9 @@ class FIVarNetModule(MriModule):
             angle = (step - self.cosine_decay_start) / cosine_steps * math.pi / 2
             return max(math.cos(angle), 1e-8)
 
+        lr_base = self.lr if self.lr_base is None else self.lr_base
+        lr_mask = self.lr if self.lr_mask is None else self.lr_mask
+
         if (
             self.learnable_mask
             and hasattr(self.fi_varnet, "base_varnet")
@@ -222,12 +214,12 @@ class FIVarNetModule(MriModule):
                 [
                     {
                         "params": self.fi_varnet.base_varnet.parameters(),
-                        "lr": self.lr_base,
+                        "lr": lr_base,
                         "weight_decay": self.weight_decay,
                     },
                     {
                         "params": self.fi_varnet.learnable_mask.parameters(),
-                        "lr": self.lr_mask,
+                        "lr": lr_mask,
                         "weight_decay": self.weight_decay,
                     },
                 ]
