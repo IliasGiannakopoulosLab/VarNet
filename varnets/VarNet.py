@@ -4,6 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from data.learnable_mask import LearnableCartesianMask
 torch.set_float32_matmul_precision("high")
 from utilities.functions import ifft2c_new as ifft2c
 from utilities.functions import (
@@ -779,6 +781,64 @@ class E2EVarNet(nn.Module):
             )
 
         return rss(complex_abs(ifft2c(kspace_pred)), dim=1)
+
+
+# -------------------------------------------#
+# -------- learnable masked varnet --------- #
+# -------------------------------------------#
+class LearnableMaskedVarNet(nn.Module):
+    """Apply a learnable 1D Cartesian mask before an E2E or FI VarNet."""
+
+    def __init__(
+        self,
+        base_varnet: nn.Module,
+        acceleration: int,
+        center_fraction: float,
+        num_logits: int = 320,
+    ):
+        super().__init__()
+
+        self.base_varnet = base_varnet
+        self.learnable_mask = LearnableCartesianMask(
+            acceleration=acceleration,
+            center_fraction=center_fraction,
+            num_logits=num_logits,
+        )
+        self.latest_mask_info = None
+
+    def forward(
+        self,
+        full_kspace: torch.Tensor,
+        acq_start,
+        acq_end,
+        crop_size: Optional[Tuple[int, int]] = None,
+        return_mask_extras: bool = False,
+    ):
+        masked_kspace, mask, num_low_frequencies, extras = self.learnable_mask(
+            full_kspace=full_kspace,
+            acq_start=acq_start,
+            acq_end=acq_end,
+        )
+
+        mask_info = {
+            "masked_kspace": masked_kspace,
+            "mask": mask,
+            "num_low_frequencies": num_low_frequencies,
+            **extras,
+        }
+        self.latest_mask_info = mask_info
+
+        output = self.base_varnet(
+            masked_kspace=masked_kspace,
+            mask=mask,
+            num_low_frequencies=num_low_frequencies,
+            crop_size=crop_size,
+        )
+
+        if return_mask_extras:
+            return output, mask_info
+
+        return output
 
 
 # -------------------------------------------#
