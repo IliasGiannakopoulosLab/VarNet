@@ -180,6 +180,16 @@ def save_reconstructions(reconstructions: Dict[str, dict], out_dir: Path):
         with h5py.File(out_dir / fname, "w") as hf:
             hf.create_dataset("reconstruction", data=item["reconstruction"])
 
+            for key in (
+                "mask_1d",
+                "support_width",
+                "effective_acceleration",
+                "acq_start",
+                "acq_end",
+            ):
+                if key in item:
+                    hf.create_dataset(key, data=item[key])
+
 
 # -------------------------------------------#
 # -------- convert fnames to v2 ------------ #
