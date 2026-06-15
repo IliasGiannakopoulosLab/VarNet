@@ -12,7 +12,12 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from data.data_module import DataModule
 from data.data_transforms import VarNetDataTransform
 from data.undersampling_patterns import create_mask_for_mask_type
-from varnets.VarNet import E2EVarNet, FIVarNet, UncertaintyNetwork
+from varnets.VarNet import (
+    E2EVarNet,
+    FIVarNet,
+    LearnableMaskedVarNet,
+    UncertaintyNetwork,
+)
 from varnets.uncertainty_module import UncertaintyModule
 
 
@@ -26,6 +31,28 @@ def check_gpu_availability() -> int:
     command = "nvidia-smi --query-gpu=index --format=csv,noheader | wc -l"
     output = subprocess.check_output(command, shell=True).decode("utf-8").strip()
     return int(output)
+
+
+def _adapt_state_dict_for_model(model: torch.nn.Module, state_dict: dict) -> dict:
+    """Adapt plain-VarNet and learnable-wrapper checkpoints in either direction."""
+    target_keys = set(model.state_dict().keys())
+    target_is_wrapper = any(key.startswith("base_varnet.") for key in target_keys)
+    source_is_wrapper = any(
+        key.startswith("base_varnet.") or key.startswith("learnable_mask.")
+        for key in state_dict
+    )
+
+    if target_is_wrapper and not source_is_wrapper:
+        return {f"base_varnet.{key}": value for key, value in state_dict.items()}
+
+    if source_is_wrapper and not target_is_wrapper:
+        return {
+            key[len("base_varnet."):]: value
+            for key, value in state_dict.items()
+            if key.startswith("base_varnet.")
+        }
+
+    return state_dict
 
 
 def _filter_state_dict_by_prefix(state_dict: dict, module_name: str) -> dict:
@@ -72,13 +99,36 @@ def load_varnet_weights_only(
         weight_path=weight_path,
         module_name=module_name,
     )
+    filtered = _adapt_state_dict_for_model(model, filtered)
 
     missing, unexpected = model.load_state_dict(filtered, strict=False)
     print("load_varnet_weights_only:")
     print("  missing keys   :", len(missing))
     print("  unexpected keys:", len(unexpected))
 
+    missing_mask_keys = [
+        key for key in missing if key.startswith("learnable_mask.")
+    ]
+    if missing_mask_keys:
+        raise RuntimeError(
+            "The selected VarNet checkpoint does not contain trained learnable-mask "
+            f"parameters. Missing keys: {missing_mask_keys}"
+        )
+
     return model
+
+
+def _get_single_learnable_mask_params(args):
+    if len(args.accelerations) != 1:
+        raise ValueError(
+            "Learnable mask mode requires exactly one acceleration."
+        )
+    if len(args.center_fractions) != 1:
+        raise ValueError(
+            "Learnable mask mode requires exactly one center fraction."
+        )
+
+    return int(args.accelerations[0]), float(args.center_fractions[0])
 
 
 # ============================================================
@@ -110,6 +160,16 @@ def build_base_varnet(args, acceleration: int):
 
 
 def fetch_varnet_model(args):
+    if args.mask_mode == "learnable":
+        acceleration, center_fraction = _get_single_learnable_mask_params(args)
+        base_varnet = build_base_varnet(args, acceleration=acceleration)
+        return LearnableMaskedVarNet(
+            base_varnet=base_varnet,
+            acceleration=acceleration,
+            center_fraction=center_fraction,
+            num_logits=args.num_logits,
+        )
+
     acceleration = int(round(sum(args.accelerations) / len(args.accelerations)))
     return build_base_varnet(args, acceleration=acceleration)
 
@@ -126,6 +186,30 @@ def fetch_uncertainty_model(args):
 # TRANSFORMS
 # ============================================================
 def build_transforms(args):
+    if args.mask_mode == "learnable":
+        _get_single_learnable_mask_params(args)
+        train_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=False,
+            learnable_mask=True,
+        )
+        val_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=True,
+            learnable_mask=True,
+        )
+        cal_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=True,
+            learnable_mask=True,
+        )
+        test_transform = VarNetDataTransform(
+            mask_func=None,
+            use_seed=True,
+            learnable_mask=True,
+        )
+        return train_transform, val_transform, cal_transform, test_transform
+
     mask = create_mask_for_mask_type(
         args.mask_type,
         args.center_fractions,
@@ -226,6 +310,7 @@ def cli_main(args):
     pl_module = UncertaintyModule(
         varnet_model=varnet_model,
         uncertainty_model=uncertainty_model,
+        learnable_mask=(args.mask_mode == "learnable"),
         model_name=args.model_name,
         varnet_ckpt=None,
         lr=args.lr,
@@ -327,6 +412,13 @@ def build_args(cluster_launch: bool = True):
     parser.add_argument("--reconstructions_dir", type=Path, default=None)
 
     parser.add_argument(
+        "--mask_mode",
+        choices=("fixed", "learnable"),
+        default="fixed",
+        type=str,
+    )
+
+    parser.add_argument(
         "--mask_type",
         choices=("equispaced_fraction", "equispaced"),
         default="equispaced_fraction",
@@ -335,6 +427,12 @@ def build_args(cluster_launch: bool = True):
 
     parser.add_argument("--center_fractions", nargs="+", default=[0.08], type=float)
     parser.add_argument("--accelerations", nargs="+", default=[4], type=int)
+    parser.add_argument(
+        "--num_logits",
+        type=int,
+        default=320,
+        help="Canonical phase-encoding width of the learnable 1D mask.",
+    )
 
     parser.add_argument(
         "--varnet_type",
