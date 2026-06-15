@@ -11,6 +11,7 @@ The repository includes:
 - Pixelwise uncertainty estimation for fixed-mask and learned-mask reconstructions
 
 Both E2E VarNet and FI VarNet can be trained with either fixed or learnable masks. The uncertainty pipeline is compatible with all four combinations.
+
 ---
 
 ## Supported workflows
@@ -48,7 +49,6 @@ utilities/
 runner.py                     Reconstruction training and testing entry point
 runner_uncertainty.py         Uncertainty training, calibration, and testing entry point
 batch_run.sh                  SLURM launcher for all workflows
-tests/test_learnable_mask.py  Learnable-mask and compatibility tests
 ```
 
 ---
@@ -115,18 +115,18 @@ MASK_MODE=learnable
 NUM_LOGITS=320
 ```
 
-The learnable mask has the following behavior:
+The learnable mask preserves the original implementation from the full internal repository:
 
 - A contiguous central region remains fully sampled.
 - The outer phase-encoding probabilities are learned jointly with the VarNet weights.
-- The sampling probabilities are normalized to the budget defined by `ACCELERATION` and `CENTER_FRACTION`.
-- Training uses Bernoulli sampling with a straight-through gradient estimator.
-- Validation, testing, calibration, and uncertainty inference use a deterministic highest-probability mask with the exact rounded sampling budget.
+- The outer probabilities are renormalized so that their mean matches the sampling ratio implied by `ACCELERATION` and `CENTER_FRACTION`.
+- A binary outer mask is drawn using Bernoulli sampling at every forward pass.
+- A straight-through estimator propagates gradients through the sampled binary mask.
+- The same stochastic sampling behavior is used during training, validation, testing, calibration, and uncertainty inference.
+- The realized number of sampled lines, and therefore the effective acceleration, can vary between forward passes around the requested expected sampling budget.
 - The learned parameter vector is defined on a canonical support of length `NUM_LOGITS` and is interpolated when the acquired phase-encoding support has a different width.
 
-The deterministic evaluation mask is important because reconstruction testing and uncertainty inference must use the same learned sampling pattern.
-
-Learnable-mask mode currently requires exactly one acceleration and one center fraction per run. A batch size of one is recommended when acquisition support widths vary between examples.
+Learnable-mask mode requires one acceleration and one center fraction per run. A batch size of one is recommended when acquisition support widths vary between examples.
 
 The reconstruction and mask can use separate learning rates:
 
@@ -156,9 +156,9 @@ train VarNet and, when selected, the learnable mask
     -> append uncertainty maps to the reconstruction HDF5 files
 ```
 
-For learned-mask experiments, the reconstruction checkpoint contains both the VarNet weights and the learned mask parameters. The uncertainty runner loads and freezes the complete model. A fixed-mask checkpoint cannot be used as a learned-mask checkpoint because it does not contain trained mask parameters.
+For learned-mask experiments, the reconstruction checkpoint contains both the VarNet weights and the learned mask parameters. The uncertainty runner reconstructs the corresponding learnable-mask model and loads the trained checkpoint before uncertainty training, calibration, or testing.
 
-The same values of the following variables must be used for reconstruction and uncertainty:
+Use the same reconstruction and mask settings for the reconstruction and uncertainty stages:
 
 ```bash
 MODEL_NAME
@@ -175,14 +175,12 @@ SENS_POOLS
 
 ---
 
-## Dataset format
+## Dataset location and output location
 
-The code expects fastMRI-style HDF5 files containing multicoil k-space data and the corresponding RSS reconstruction target.
-
-A typical folder structure is:
+The NYU fastMRI datasets are treated as read-only inputs and are expected under:
 
 ```text
-/path/to/data/
+/gpfs/data/gianni02lab/Team/Datasets/FastMRI/
   knee/
     multicoil_train/
     multicoil_val/
@@ -196,36 +194,48 @@ A typical folder structure is:
     multicoil_test/
 ```
 
-The calibration split is used only by the uncertainty workflow.
-
----
-
-## Before running: update `batch_run.sh`
-
-`batch_run.sh` contains paths from the original development environment. Update the following variables before running the repository on another machine or cluster:
+The default dataset root in `batch_run.sh` is:
 
 ```bash
-HOME_DIR=/path/to/project_or_data_root
-VARNET_DIR=/path/to/this/repository
-LOG_PATH=/path/to/output/logs
-DATA_DIR=/path/to/data/${ANATOMY}/
-VN_TRAIN_PATH=/path/to/data/${ANATOMY}/multicoil_train/
-VN_VAL_PATH=/path/to/data/${ANATOMY}/multicoil_val/
-VN_CAL_PATH=/path/to/data/${ANATOMY}/multicoil_cal/
-VN_TEST_PATH=/path/to/data/${ANATOMY}/multicoil_test/
+DATA_ROOT=/gpfs/data/gianni02lab/Team/Datasets/FastMRI
 ```
 
-You may also need to edit the SLURM header:
+The code does not intentionally write checkpoints, reconstructions, uncertainty outputs, logs, or dataset caches into the dataset directories.
+
+All generated files are stored under the user-owned output root:
 
 ```bash
-#SBATCH --partition=radiology
-#SBATCH --cpus-per-task=10
-#SBATCH --time=3-00:00:00
-#SBATCH --mem=300G
-#SBATCH --gres=gpu:a100:1
+OUTPUT_ROOT=/gpfs/data/gianni02lab/Ilias/Image_Reconstruction/Learnable_Mask_Models
 ```
 
-Change the partition, GPU type, memory, wall time, and other resource requests to match your system.
+Each experiment receives its own model-specific directory:
+
+```text
+${OUTPUT_ROOT}/${VN_MODEL}/
+```
+
+For example:
+
+```text
+/gpfs/data/gianni02lab/Ilias/Image_Reconstruction/Learnable_Mask_Models/
+  Model_knee_e2e_varnet_10x_SSIM_learnable_mask/
+```
+
+This directory contains the SLURM log, `dataset_cache.pkl`, checkpoints, TensorBoard logs, reconstructions, and uncertainty outputs associated with that model.
+
+Before running, verify the repository location in `batch_run.sh`:
+
+```bash
+VARNET_DIR=/gpfs/home/gianni02/VarNet-main
+```
+
+Other users should keep the shared dataset root unchanged and override only their own output root:
+
+```bash
+OUTPUT_ROOT=/gpfs/data/gianni02lab/<username>/Image_Reconstruction/Learnable_Mask_Models
+```
+
+You may also need to edit the SLURM resource header to match the cluster partition, GPU type, memory, and wall-time requirements.
 
 ---
 
@@ -246,7 +256,7 @@ BATCH_SIZE=1
 NUM_WORKERS=4
 ```
 
-When `CENTER_FRACTION` is left empty, `batch_run.sh` uses the following defaults:
+When `CENTER_FRACTION` is left empty, `batch_run.sh` uses:
 
 ```text
 2x  -> 0.16
@@ -352,13 +362,13 @@ sbatch \
   batch_run.sh
 ```
 
-Reconstruction outputs are saved under:
+Reconstruction outputs are saved below:
 
 ```text
-${LOG_PATH}/${MODEL_NAME}/reconstructions_${VN_MODEL}/
+${OUTPUT_ROOT}/${VN_MODEL}/
 ```
 
-The model name includes the anatomy, reconstruction model, acceleration, loss, and mask type. Fixed and learned experiments therefore use separate checkpoint and reconstruction directories.
+Fixed-mask and learned-mask experiments use different model names and therefore separate output directories.
 
 ---
 
@@ -416,7 +426,7 @@ After uncertainty testing, the same file also contains:
 uncertainty_map
 ```
 
-For learned-mask experiments, `mask_1d` is the deterministic learned mask used for inference.
+For a learned-mask experiment, `mask_1d` stores the binary mask sampled for that test reconstruction. Because the original learnable-mask implementation is stochastic, the sampled mask and effective acceleration can differ across forward passes.
 
 ---
 
