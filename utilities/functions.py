@@ -180,15 +180,20 @@ def save_reconstructions(reconstructions: Dict[str, dict], out_dir: Path):
         with h5py.File(out_dir / fname, "w") as hf:
             hf.create_dataset("reconstruction", data=item["reconstruction"])
 
-            for key in (
-                "mask_1d",
-                "support_width",
-                "effective_acceleration",
-                "acq_start",
-                "acq_end",
-            ):
-                if key in item:
-                    hf.create_dataset(key, data=item[key])
+            if "mask_1d" in item:
+                hf.create_dataset("mask_1d", data=item["mask_1d"])
+
+            if "support_width" in item:
+                hf.create_dataset("support_width", data=item["support_width"])
+
+            if "effective_acceleration" in item:
+                hf.create_dataset("effective_acceleration", data=item["effective_acceleration"])
+
+            if "acq_start" in item:
+                hf.create_dataset("acq_start", data=item["acq_start"])
+
+            if "acq_end" in item:
+                hf.create_dataset("acq_end", data=item["acq_end"])
 
 
 # -------------------------------------------#
