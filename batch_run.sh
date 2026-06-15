@@ -7,7 +7,8 @@
 #SBATCH --time=3-00:00:00
 #SBATCH --mem=300G
 #SBATCH --gres=gpu:a100:1
-#SBATCH --output=slurm_%x_%j.out
+#SBATCH --output=/dev/null
+#SBATCH --error=/dev/null
 
 set -euo pipefail
 
@@ -60,15 +61,19 @@ UNC_MAX_STEPS=${UNC_MAX_STEPS:-210000}
 UNC_RAMP_STEPS=${UNC_RAMP_STEPS:-7500}
 UNC_COSINE_DECAY_START=${UNC_COSINE_DECAY_START:-150000}
 
-# folders
-HOME_DIR=${HOME_DIR:-/gpfs/data/lattanzilab/Ilias/NYU_FAST_MRI}
+# repository location
 VARNET_DIR=${VARNET_DIR:-/gpfs/home/gianni02/VarNet-main}
-LOG_PATH=${LOG_PATH:-${HOME_DIR}/logs_detection}
-DATA_DIR=${DATA_DIR:-${HOME_DIR}/${ANATOMY}/}
-VN_TRAIN_PATH=${VN_TRAIN_PATH:-${HOME_DIR}/${ANATOMY}/multicoil_train/}
-VN_VAL_PATH=${VN_VAL_PATH:-${HOME_DIR}/${ANATOMY}/multicoil_val/}
-VN_CAL_PATH=${VN_CAL_PATH:-${HOME_DIR}/${ANATOMY}/multicoil_cal/}
-VN_TEST_PATH=${VN_TEST_PATH:-${HOME_DIR}/${ANATOMY}/multicoil_test}
+
+# read-only fastMRI dataset location
+DATA_ROOT=${DATA_ROOT:-/gpfs/data/gianni02lab/Team/Datasets/FastMRI}
+DATA_DIR=${DATA_DIR:-${DATA_ROOT}/${ANATOMY}}
+VN_TRAIN_PATH=${VN_TRAIN_PATH:-${DATA_DIR}/multicoil_train}
+VN_VAL_PATH=${VN_VAL_PATH:-${DATA_DIR}/multicoil_val}
+VN_CAL_PATH=${VN_CAL_PATH:-${DATA_DIR}/multicoil_cal}
+VN_TEST_PATH=${VN_TEST_PATH:-${DATA_DIR}/multicoil_test}
+
+# user-owned output location
+OUTPUT_ROOT=${OUTPUT_ROOT:-/gpfs/data/gianni02lab/Ilias/Image_Reconstruction/Learnable_Mask_Models}
 
 if [ -z "${CENTER_FRACTION}" ]; then
     case ${ACCELERATION} in
@@ -89,12 +94,28 @@ fi
 
 VN_MODEL=Model_${ANATOMY}_${MODEL_NAME}_${ACCELERATION}x_SSIM_${MASK_TAG}
 UNC_MODEL=${VN_MODEL}_uncertainty
-RUN_ROOT_DIR=${LOG_PATH}/${MODEL_NAME}
+
+# Every generated file is stored below this model-specific directory.
+MODEL_OUTPUT_DIR=${OUTPUT_ROOT}/${VN_MODEL}
+LOG_PATH=${MODEL_OUTPUT_DIR}
+RUN_ROOT_DIR=${MODEL_OUTPUT_DIR}/${MODEL_NAME}
 UNC_ROOT_DIR=${RUN_ROOT_DIR}/uncertainty
 CHECKPOINT_DIR=${RUN_ROOT_DIR}/checkpoints/${VN_MODEL}
 UNC_CHECKPOINT_DIR=${UNC_ROOT_DIR}/checkpoints/${UNC_MODEL}
 VN_PREDICTIONS_PATH=${RUN_ROOT_DIR}/reconstructions_${VN_MODEL}
 VARNET_CKPT_PREFIX=fi_varnet.
+
+mkdir -p "${MODEL_OUTPUT_DIR}"
+
+# SLURM stdout/stderr is also stored inside the model directory.
+SLURM_LOG_FILE=${MODEL_OUTPUT_DIR}/slurm_${SLURM_JOB_NAME:-VN_recon}_${SLURM_JOB_ID:-manual}.out
+exec > >(tee -a "${SLURM_LOG_FILE}") 2>&1
+
+# Make the repository importable while keeping the working directory inside
+# MODEL_OUTPUT_DIR. This also stores dataset_cache.pkl in the model directory
+# instead of the repository or the read-only dataset directory.
+export PYTHONPATH="${VARNET_DIR}:${PYTHONPATH:-}"
+cd "${MODEL_OUTPUT_DIR}"
 
 resolve_preferred_ckpt() {
     local ckpt_dir="$1"
@@ -205,40 +226,38 @@ echo "POOLS                 : ${POOLS}"
 echo "SENS_CHANS            : ${SENS_CHANS}"
 echo "SENS_POOLS            : ${SENS_POOLS}"
 echo "PRECISION             : ${PRECISION}"
+echo "VARNET_DIR            : ${VARNET_DIR}"
+echo "DATA_DIR              : ${DATA_DIR}"
+echo "MODEL_OUTPUT_DIR      : ${MODEL_OUTPUT_DIR}"
 echo "CHECKPOINT_DIR        : ${CHECKPOINT_DIR}"
 echo "VN_PREDICTIONS_PATH   : ${VN_PREDICTIONS_PATH}"
+echo "SLURM_LOG_FILE        : ${SLURM_LOG_FILE}"
 echo "============================================================"
 
 if [ "${RUN_TRAINING}" = "true" ]; then
-    cd "${VARNET_DIR}"
-    srun python3 runner.py "${COMMON_ARGS[@]}" "${MASK_ARGS[@]}" "${TRAIN_MODE_ARGS[@]}"
+    srun python3 "${VARNET_DIR}/runner.py" "${COMMON_ARGS[@]}" "${MASK_ARGS[@]}" "${TRAIN_MODE_ARGS[@]}"
 fi
 
 VN_CHECKPOINT_PATH=$(resolve_preferred_ckpt "${CHECKPOINT_DIR}")
 
 if [ "${RUN_TESTING}" = "true" ]; then
-    cd "${VARNET_DIR}"
-    srun python3 runner.py "${COMMON_ARGS[@]}" "${MASK_ARGS[@]}" --mode test --test_path "${VN_TEST_PATH}"
+    srun python3 "${VARNET_DIR}/runner.py" "${COMMON_ARGS[@]}" "${MASK_ARGS[@]}" --mode test --test_path "${VN_TEST_PATH}"
 fi
 
 if [ "${RUN_EVALUATION}" = "true" ]; then
-    cd "${VARNET_DIR}"
     srun python3 -m utilities.evaluation --target-path "${VN_TEST_PATH}" --predictions-path "${VN_PREDICTIONS_PATH}"
 fi
 
 if [ "${RUN_UNCERTAINTY_TRAINING}" = "true" ]; then
-    cd "${VARNET_DIR}"
-    srun python3 runner_uncertainty.py "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode train --varnet_ckpt "${VN_CHECKPOINT_PATH}"
+    srun python3 "${VARNET_DIR}/runner_uncertainty.py" "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode train --varnet_ckpt "${VN_CHECKPOINT_PATH}"
 fi
 
 UNC_CHECKPOINT_PATH=$(resolve_preferred_ckpt "${UNC_CHECKPOINT_DIR}")
 
 if [ "${RUN_UNCERTAINTY_CALIBRATION}" = "true" ]; then
-    cd "${VARNET_DIR}"
-    srun python3 runner_uncertainty.py "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode calibrate --devices 1 --varnet_ckpt "${VN_CHECKPOINT_PATH}" --uncertainty_ckpt "${UNC_CHECKPOINT_PATH}" --output_uncertainty_ckpt "${UNC_CHECKPOINT_PATH}"
+    srun python3 "${VARNET_DIR}/runner_uncertainty.py" "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode calibrate --devices 1 --varnet_ckpt "${VN_CHECKPOINT_PATH}" --uncertainty_ckpt "${UNC_CHECKPOINT_PATH}" --output_uncertainty_ckpt "${UNC_CHECKPOINT_PATH}"
 fi
 
 if [ "${RUN_UNCERTAINTY_TESTING}" = "true" ]; then
-    cd "${VARNET_DIR}"
-    srun python3 runner_uncertainty.py "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode test --varnet_ckpt "${VN_CHECKPOINT_PATH}" --uncertainty_ckpt "${UNC_CHECKPOINT_PATH}" --reconstructions_dir "${VN_PREDICTIONS_PATH}" --test_path "${VN_TEST_PATH}"
+    srun python3 "${VARNET_DIR}/runner_uncertainty.py" "${UNC_ARGS[@]}" "${MASK_ARGS[@]}" --mode test --varnet_ckpt "${VN_CHECKPOINT_PATH}" --uncertainty_ckpt "${UNC_CHECKPOINT_PATH}" --reconstructions_dir "${VN_PREDICTIONS_PATH}" --test_path "${VN_TEST_PATH}"
 fi
