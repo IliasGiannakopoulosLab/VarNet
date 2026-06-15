@@ -14,7 +14,9 @@ set -euo pipefail
 ANATOMY=${ANATOMY:-knee}
 ACCELERATION=${ACCELERATION:-4}
 CENTER_FRACTION=${CENTER_FRACTION:-}
+MASK_MODE=${MASK_MODE:-fixed}
 FIXED_MASK_TYPE=${FIXED_MASK_TYPE:-equispaced_fraction}
+NUM_LOGITS=${NUM_LOGITS:-320}
 TRAIN_MODE=${TRAIN_MODE:-train}
 FINE_TUNE_CKPT=${FINE_TUNE_CKPT:-your_checkpoint.ckpt}
 BATCH_SIZE=${BATCH_SIZE:-1}
@@ -35,6 +37,8 @@ POOLS=${POOLS:-4}
 SENS_CHANS=${SENS_CHANS:-8}
 SENS_POOLS=${SENS_POOLS:-4}
 VN_LR=${VN_LR:-0.0003}
+VN_LR_BASE=${VN_LR_BASE:-}
+VN_LR_MASK=${VN_LR_MASK:-}
 VN_WEIGHT_DECAY=${VN_WEIGHT_DECAY:-0.0}
 VN_MAX_STEPS=${VN_MAX_STEPS:-210000}
 VN_RAMP_STEPS=${VN_RAMP_STEPS:-7500}
@@ -58,7 +62,7 @@ UNC_COSINE_DECAY_START=${UNC_COSINE_DECAY_START:-150000}
 
 # folders
 HOME_DIR=${HOME_DIR:-/gpfs/data/lattanzilab/Ilias/NYU_FAST_MRI}
-VARNET_DIR=${VARNET_DIR:-/gpfs/home/gianni02/fastMRI_LabRepo}
+VARNET_DIR=${VARNET_DIR:-/gpfs/home/gianni02/VarNet-main}
 LOG_PATH=${LOG_PATH:-${HOME_DIR}/logs_detection}
 DATA_DIR=${DATA_DIR:-${HOME_DIR}/${ANATOMY}/}
 VN_TRAIN_PATH=${VN_TRAIN_PATH:-${HOME_DIR}/${ANATOMY}/multicoil_train/}
@@ -77,7 +81,13 @@ if [ -z "${CENTER_FRACTION}" ]; then
     esac
 fi
 
-VN_MODEL=Model_${ANATOMY}_${MODEL_NAME}_${ACCELERATION}x_SSIM_${FIXED_MASK_TYPE}
+if [ "${MASK_MODE}" = "learnable" ]; then
+    MASK_TAG=learnable_mask
+else
+    MASK_TAG=${FIXED_MASK_TYPE}
+fi
+
+VN_MODEL=Model_${ANATOMY}_${MODEL_NAME}_${ACCELERATION}x_SSIM_${MASK_TAG}
 UNC_MODEL=${VN_MODEL}_uncertainty
 RUN_ROOT_DIR=${LOG_PATH}/${MODEL_NAME}
 UNC_ROOT_DIR=${RUN_ROOT_DIR}/uncertainty
@@ -101,7 +111,12 @@ resolve_preferred_ckpt() {
     fi
 }
 
-MASK_ARGS=(--mask_type "${FIXED_MASK_TYPE}")
+MASK_ARGS=(--mask_mode "${MASK_MODE}")
+if [ "${MASK_MODE}" = "fixed" ]; then
+    MASK_ARGS+=(--mask_type "${FIXED_MASK_TYPE}")
+else
+    MASK_ARGS+=(--num_logits "${NUM_LOGITS}")
+fi
 
 TRAIN_MODE_ARGS=(--mode "${TRAIN_MODE}")
 if [ "${TRAIN_MODE}" = "fine_tune" ]; then
@@ -131,6 +146,13 @@ COMMON_ARGS=(
     --batch_size "${BATCH_SIZE}"
     --num_workers "${NUM_WORKERS}"
 )
+
+if [ -n "${VN_LR_BASE}" ]; then
+    COMMON_ARGS+=(--lr_base "${VN_LR_BASE}")
+fi
+if [ -n "${VN_LR_MASK}" ]; then
+    COMMON_ARGS+=(--lr_mask "${VN_LR_MASK}")
+fi
 
 UNC_ARGS=(
     --data_path "${DATA_DIR}"
@@ -173,7 +195,9 @@ echo "UNC_MODEL             : ${UNC_MODEL}"
 echo "ANATOMY               : ${ANATOMY}"
 echo "ACCELERATION          : ${ACCELERATION}"
 echo "CENTER_FRACTION       : ${CENTER_FRACTION}"
+echo "MASK_MODE             : ${MASK_MODE}"
 echo "FIXED_MASK_TYPE       : ${FIXED_MASK_TYPE}"
+echo "NUM_LOGITS            : ${NUM_LOGITS}"
 echo "BATCH_SIZE            : ${BATCH_SIZE}"
 echo "NUM_CASCADES          : ${NUM_CASCADES}"
 echo "CHANS                 : ${CHANS}"
