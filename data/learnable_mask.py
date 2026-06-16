@@ -14,7 +14,8 @@ class LearnableCartesianMask(nn.Module):
       - map parameters to probabilities with a sigmoid (slope a = 0.25)
       - renormalize the OUTER probabilities so their mean matches the desired
         outer sampling ratio implied by the target acceleration and fixed center
-      - sample a binary outer mask at every forward pass
+      - sample a binary outer mask with Bernoulli sampling during training
+      - select the highest-probability outer lines during validation and testing
       - use a straight-through estimator for backprop through the binary sample
       - keep the center region fully sampled and fixed
       - adapt one learned canonical profile to variable support widths via 1D interpolation
@@ -229,10 +230,23 @@ class LearnableCartesianMask(nn.Module):
                 outer_prob_means.append(outer_probs.mean())
                 target_outer_mean_list.append(target_outer_mean)
 
-                u_outer = torch.rand_like(outer_probs)
-                hard_outer = (u_outer < outer_probs).to(outer_probs.dtype)
-
-                # Straight-through estimator for the binary stochastic sampling block:
+                if self.training:
+                    u_outer = torch.rand_like(outer_probs)
+                    hard_outer = (u_outer < outer_probs).to(outer_probs.dtype)
+                else:
+                    num_outer_samples = int(round(target_outer_mean * outer_count))
+                
+                    hard_outer = torch.zeros_like(outer_probs)
+                
+                    if num_outer_samples > 0:
+                        topk_indices = torch.topk(
+                            outer_probs,
+                            k=num_outer_samples,
+                        ).indices
+                
+                        hard_outer[topk_indices] = 1.0
+                
+                # Straight-through estimator for the binary sampling block:
                 # forward -> binary mask, backward -> identity wrt probabilities.
                 st_outer = hard_outer + outer_probs - outer_probs.detach()
 
