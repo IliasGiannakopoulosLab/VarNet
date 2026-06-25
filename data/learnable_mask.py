@@ -235,17 +235,17 @@ class LearnableCartesianMask(nn.Module):
                     hard_outer = (u_outer < outer_probs).to(outer_probs.dtype)
                 else:
                     num_outer_samples = int(round(target_outer_mean * outer_count))
-                
+
                     hard_outer = torch.zeros_like(outer_probs)
-                
+
                     if num_outer_samples > 0:
                         topk_indices = torch.topk(
                             outer_probs,
                             k=num_outer_samples,
                         ).indices
-                
+
                         hard_outer[topk_indices] = 1.0
-                
+
                 # Straight-through estimator for the binary sampling block:
                 # forward -> binary mask, backward -> identity wrt probabilities.
                 st_outer = hard_outer + outer_probs - outer_probs.detach()
