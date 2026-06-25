@@ -353,6 +353,7 @@ def cli_main(args):
         sample_rate=args.sample_rate,
         val_sample_rate=args.val_sample_rate,
         test_sample_rate=args.test_sample_rate,
+        file_split=args.file_split,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         distributed_sampler=(args.accelerator in ("ddp", "ddp_cpu")),
