@@ -384,24 +384,96 @@ class UncertaintyModule(pl.LightningModule):
 
         return lower_cal, upper_cal
 
-    def get_calibration_losses_from_dataloader(
+    # ------------------------------------------------------------
+    # OLD CALIBRATION HELPER, KEPT HERE COMMENTED OUT FOR REFERENCE
+    # ------------------------------------------------------------
+    # def get_calibration_losses_from_dataloader(
+    #     self,
+    #     dataloader,
+    #     lam: float,
+    #     device: Optional[str] = None,
+    #     keep_indices: Optional[Sequence[int]] = None,
+    # ) -> torch.Tensor:
+    #     if device is None:
+    #         device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    #
+    #     self.eval()
+    #     self.to(device)
+    #
+    #     losses = []
+    #     batch_counter = 0
+    #
+    #     with torch.no_grad():
+    #         for batch in dataloader:
+    #             if keep_indices is not None and batch_counter not in keep_indices:
+    #                 batch_counter += 1
+    #                 continue
+    #
+    #             batch = self._move_batch_to_device(batch, device)
+    #
+    #             recon, lower_pred, upper_pred = self.forward(batch)
+    #
+    #             target = batch.target
+    #
+    #             target, recon, lower_pred, upper_pred = self._crop_to_target(
+    #                 target, recon, lower_pred, upper_pred
+    #             )
+    #
+    #             lower_cal, upper_cal = self._apply_lambda(
+    #                 recon, lower_pred, upper_pred, lam
+    #             )
+    #
+    #             loss = self._fraction_missed_loss(lower_cal, upper_cal, target).cpu()
+    #             losses.append(loss)
+    #             batch_counter += 1
+    #
+    #     if len(losses) == 0:
+    #         raise RuntimeError("No calibration losses were collected.")
+    #
+    #     return torch.cat(losses, dim=0)
+
+    def get_calibration_losses_grid_from_dataloader(
         self,
         dataloader,
-        lam: float,
+        lambdas: torch.Tensor,
         device: Optional[str] = None,
         keep_indices: Optional[Sequence[int]] = None,
     ) -> torch.Tensor:
+        """
+        Efficient calibration helper.
+
+        Computes the frozen VarNet reconstruction and the uncertainty-network
+        predictions once per calibration batch, then evaluates all lambdas on
+        those cached tensors.
+
+        Returns:
+            losses_grid with shape [num_lambdas, num_images].
+        """
         if device is None:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
         self.eval()
         self.to(device)
 
-        losses = []
+        lambdas = lambdas.to(device=device, dtype=torch.float32)
+
+        losses_per_lambda = [[] for _ in range(lambdas.numel())]
         batch_counter = 0
+
+        print(
+            f"[Calibration] dataloader batches = {len(dataloader)}",
+            flush=True,
+        )
 
         with torch.no_grad():
             for batch in dataloader:
+
+                if batch_counter % 25 == 0:
+                    print(
+                        f"[Calibration] batch={batch_counter}/{len(dataloader)}",
+                        flush=True,
+                    )
+
                 if keep_indices is not None and batch_counter not in keep_indices:
                     batch_counter += 1
                     continue
@@ -416,18 +488,40 @@ class UncertaintyModule(pl.LightningModule):
                     target, recon, lower_pred, upper_pred
                 )
 
-                lower_cal, upper_cal = self._apply_lambda(
-                    recon, lower_pred, upper_pred, lam
-                )
+                lower_pred = torch.minimum(lower_pred, recon)
+                upper_pred = torch.maximum(upper_pred, recon)
 
-                loss = self._fraction_missed_loss(lower_cal, upper_cal, target).cpu()
-                losses.append(loss)
+                recon_minus_lower = recon - lower_pred
+                upper_minus_recon = upper_pred - recon
+
+                for lam_idx, lam in enumerate(lambdas):
+                    lower_cal = torch.clamp(
+                        recon - lam * recon_minus_lower,
+                        min=0.0,
+                    )
+                    upper_cal = recon + lam * upper_minus_recon
+
+                    loss = self._fraction_missed_loss(
+                        lower_cal,
+                        upper_cal,
+                        target,
+                    ).cpu()
+                    losses_per_lambda[lam_idx].append(loss)
+
                 batch_counter += 1
 
-        if len(losses) == 0:
+        if len(losses_per_lambda) == 0 or len(losses_per_lambda[0]) == 0:
             raise RuntimeError("No calibration losses were collected.")
 
-        return torch.cat(losses, dim=0)
+        losses_grid = torch.stack(
+            [
+                torch.cat(losses_for_lambda, dim=0)
+                for losses_for_lambda in losses_per_lambda
+            ],
+            dim=0,
+        )
+
+        return losses_grid
 
     def calibrate(
         self,
@@ -458,20 +552,61 @@ class UncertaintyModule(pl.LightningModule):
 
         best_lambda = None
 
-        for lam in reversed(lambdas):
-            losses = self.get_calibration_losses_from_dataloader(
-                dataloader=dataloader,
-                lam=float((lam - dlambda).item()),
-                device=device,
-                keep_indices=keep_indices,
-            )
+        # ------------------------------------------------------------
+        # OLD CALIBRATION LOOP, KEPT HERE COMMENTED OUT FOR REFERENCE
+        # ------------------------------------------------------------
+        # for lam in reversed(lambdas):
+        #     losses = self.get_calibration_losses_from_dataloader(
+        #         dataloader=dataloader,
+        #         lam=float((lam - dlambda).item()),
+        #         device=device,
+        #         keep_indices=keep_indices,
+        #     )
+        #
+        #     Rhat = losses.mean().item()
+        #     RhatPlus = self._HB_mu_plus(Rhat, losses.shape[0], self.calibration_delta)
+        #
+        #     print(
+        #         f"[Calibration] lambda={lam.item():.4f} "
+        #         f"Rhat={Rhat:.4f} RhatPlus={RhatPlus:.4f}"
+        #     )
+        #
+        #     if Rhat >= self.alpha or RhatPlus > self.alpha:
+        #         best_lambda = float(lam.item())
+        #         break
+
+        scan_lambdas = torch.stack(
+            [lam - dlambda for lam in reversed(lambdas)],
+            dim=0,
+        )
+        display_lambdas = torch.stack(
+            [lam for lam in reversed(lambdas)],
+            dim=0,
+        )
+
+        print(
+            f"[Calibration] computing losses for {scan_lambdas.numel()} lambdas "
+            f"using one dataloader pass",
+            flush=True,
+        )
+
+        losses_grid = self.get_calibration_losses_grid_from_dataloader(
+            dataloader=dataloader,
+            lambdas=scan_lambdas,
+            device=device,
+            keep_indices=keep_indices,
+        )
+
+        for lam_idx, lam in enumerate(display_lambdas):
+            losses = losses_grid[lam_idx]
 
             Rhat = losses.mean().item()
             RhatPlus = self._HB_mu_plus(Rhat, losses.shape[0], self.calibration_delta)
 
             print(
                 f"[Calibration] lambda={lam.item():.4f} "
-                f"Rhat={Rhat:.4f} RhatPlus={RhatPlus:.4f}"
+                f"Rhat={Rhat:.4f} RhatPlus={RhatPlus:.4f}",
+                flush=True,
             )
 
             if Rhat >= self.alpha or RhatPlus > self.alpha:
@@ -482,7 +617,7 @@ class UncertaintyModule(pl.LightningModule):
             raise RuntimeError("Optimal calibration lambda not found in scanned range.")
 
         self.calibration_lambda = best_lambda
-        print(f"[Calibration] selected lambda = {self.calibration_lambda:.6f}")
+        print(f"[Calibration] selected lambda = {self.calibration_lambda:.6f}", flush=True)
         return self.calibration_lambda
 
     # ============================================================
