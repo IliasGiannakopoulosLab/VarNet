@@ -111,6 +111,7 @@ class DataModule(pl.LightningDataModule):
         val_filter: Optional[Callable] = None,
         test_filter: Optional[Callable] = None,
         cal_filter: Optional[Callable] = None,
+        file_split: Optional[str] = None,
         use_dataset_cache_file: bool = True,
         batch_size: int = 1,
         num_workers: int = 4,
@@ -147,6 +148,7 @@ class DataModule(pl.LightningDataModule):
         self.val_filter = val_filter
         self.test_filter = test_filter
         self.cal_filter = cal_filter
+        self.file_split = None if file_split in (None, "full") else file_split
 
         # -------------------------------------------#
         # -------- loader configs ------------------ #
@@ -155,6 +157,11 @@ class DataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.distributed_sampler = distributed_sampler
+
+    def _file_split_for_partition(self, data_partition: str) -> Optional[str]:
+        if data_partition in ("train", "val"):
+            return self.file_split
+        return None
 
     # -------------------------------------------#
     # -------- dataloader builder -------------- #
@@ -186,6 +193,8 @@ class DataModule(pl.LightningDataModule):
             sample_rate = self.test_sample_rate if sample_rate is None else sample_rate
             raw_filter = self.test_filter
 
+        file_split = self._file_split_for_partition(data_partition)
+
         # -------------------------------------------#
         # -------- dataset creation ---------------- #
         # -------------------------------------------#
@@ -201,6 +210,7 @@ class DataModule(pl.LightningDataModule):
                 sample_rates=[sample_rate, sample_rate] if sample_rate else None,
                 use_dataset_cache=self.use_dataset_cache_file,
                 raw_sample_filter=raw_filter,
+                file_split=file_split,
             )
         else:
             if data_partition == "test" and self.test_path is not None:
@@ -222,6 +232,7 @@ class DataModule(pl.LightningDataModule):
                 sample_rate=sample_rate,
                 use_dataset_cache=self.use_dataset_cache_file,
                 raw_sample_filter=raw_filter,
+                file_split=file_split,
             )
 
         sampler = None
@@ -247,23 +258,24 @@ class DataModule(pl.LightningDataModule):
         test_path = self.test_path if self.test_path else self.data_path / "multicoil_test"
 
         paths_and_transforms = [
-            (self.data_path_train, self.train_transform),
-            (self.data_path_val, self.val_transform),
+            (self.data_path_train, self.train_transform, self.file_split),
+            (self.data_path_val, self.val_transform, self.file_split),
         ]
 
         if self.data_path_cal is not None:
-            paths_and_transforms.append((self.data_path_cal, self.cal_transform))
+            paths_and_transforms.append((self.data_path_cal, self.cal_transform, None))
 
-        paths_and_transforms.append((test_path, self.test_transform))
+        paths_and_transforms.append((test_path, self.test_transform, None))
 
         dataset_cls = SliceDataset
 
-        for path, transform in paths_and_transforms:
+        for path, transform, file_split in paths_and_transforms:
             _ = dataset_cls(
                 root=path,
                 transform=transform,
                 sample_rate=self.sample_rate,
                 use_dataset_cache=self.use_dataset_cache_file,
+                file_split=file_split,
             )
 
     # -------------------------------------------#
@@ -298,6 +310,12 @@ class DataModule(pl.LightningDataModule):
         parser.add_argument("--val_sample_rate", type=float, default=None)
         parser.add_argument("--cal_sample_rate", type=float, default=None)
         parser.add_argument("--test_sample_rate", type=float, default=None)
+        parser.add_argument(
+            "--file_split",
+            choices=("full", "odd", "even"),
+            default="full",
+            type=str,
+        )
         parser.add_argument("--use_dataset_cache_file", type=bool, default=True)
         parser.add_argument("--combine_train_val", type=bool, default=False)
         parser.add_argument("--batch_size", type=int, default=1)
@@ -327,6 +345,7 @@ class CombinedSliceDataset(torch.utils.data.Dataset):
         dataset_cache_file: Union[str, Path] = "dataset_cache.pkl",
         num_cols: Optional[Tuple[int]] = None,
         raw_sample_filter: Optional[Callable] = None,
+        file_split: Optional[str] = None,
     ):
 
         if transforms is None:
@@ -354,6 +373,7 @@ class CombinedSliceDataset(torch.utils.data.Dataset):
                 dataset_cache_file=dataset_cache_file,
                 num_cols=num_cols,
                 raw_sample_filter=raw_sample_filter,
+                file_split=file_split,
             )
 
             self.datasets.append(ds)
@@ -383,6 +403,7 @@ class SliceDataset(torch.utils.data.Dataset):
         dataset_cache_file: Union[str, Path] = "dataset_cache.pkl",
         num_cols: Optional[Tuple[int]] = None,
         raw_sample_filter: Optional[Callable] = None,
+        file_split: Optional[str] = None,
     ):
 
         self.root = Path(root)
@@ -391,6 +412,7 @@ class SliceDataset(torch.utils.data.Dataset):
         self.recons_key = "reconstruction_rss"  # Always multicoil
 
         self.raw_sample_filter = raw_sample_filter or (lambda x: True)
+        self.file_split = None if file_split in (None, "full") else file_split
         self.raw_samples: List[FastMRIRawDataSample] = []
 
         sample_rate = 1.0 if sample_rate is None else sample_rate
@@ -404,8 +426,12 @@ class SliceDataset(torch.utils.data.Dataset):
         else:
             dataset_cache = {}
 
-        if dataset_cache.get(self.root) is None or not use_dataset_cache:
-            for fname in sorted(self.root.iterdir()):
+        cache_key = self.root if self.file_split is None else (self.root, self.file_split)
+
+        if dataset_cache.get(cache_key) is None or not use_dataset_cache:
+            fnames = self._select_fnames_by_split(sorted(self.root.iterdir()))
+
+            for fname in fnames:
                 metadata, num_slices = self._retrieve_metadata(fname)
 
                 for slice_ind in range(num_slices):
@@ -414,11 +440,11 @@ class SliceDataset(torch.utils.data.Dataset):
                         self.raw_samples.append(raw_sample)
 
             if use_dataset_cache:
-                dataset_cache[self.root] = self.raw_samples
+                dataset_cache[cache_key] = self.raw_samples
                 with open(self.dataset_cache_file, "wb") as f:
                     pickle.dump(dataset_cache, f)
         else:
-            self.raw_samples = dataset_cache[self.root]
+            self.raw_samples = dataset_cache[cache_key]
 
         # -------------------------------------------#
         # -------- slice subsampling --------------- #
@@ -434,6 +460,20 @@ class SliceDataset(torch.utils.data.Dataset):
                 for rs in self.raw_samples
                 if rs.metadata["encoding_size"][1] in num_cols
             ]
+
+    def _select_fnames_by_split(self, fnames: Sequence[Path]) -> List[Path]:
+        if self.file_split is None:
+            return list(fnames)
+
+        if self.file_split not in ("odd", "even"):
+            raise ValueError(f"Unknown file_split: {self.file_split}")
+
+        keep_odd = self.file_split == "odd"
+        return [
+            fname
+            for index, fname in enumerate(fnames, start=1)
+            if (index % 2 == 1) == keep_odd
+        ]
 
     # -------------------------------------------#
     # -------- retrieve metadata --------------- #
